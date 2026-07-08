@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Local reference docs (may contain secrets)
 docs/
+
+# Lockfile omitted from deploy (cross-platform npm drift); Heroku runs npm install
+package-lock.json
