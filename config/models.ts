@@ -24,20 +24,24 @@ export type ModelConfig = {
 export const MODELS: ModelConfig[] = [
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude46Sonnet",
-    label: "Claude Sonnet (Bedrock)",
-    description: "Anthropic Claude, served via Amazon Bedrock",
+    label: "Claude Sonnet 4.6 (Bedrock)",
+    description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
   },
-  // --- Examples: uncomment/edit once confirmed enabled in your org ---
-  // {
-  //   id: "sfdc_ai__DefaultOpenAIGPT4OmniMini",
-  //   label: "GPT-4o mini",
-  //   description: "OpenAI GPT-4o mini",
-  // },
-  // {
-  //   id: "sfdc_ai__DefaultBedrockAnthropicClaude3Haiku",
-  //   label: "Claude 3 Haiku (Bedrock)",
-  //   description: "Fast, low-cost Anthropic Claude 3 Haiku",
-  // },
+  {
+    id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
+    label: "Claude Opus 4.8 (Bedrock)",
+    description: "Anthropic Claude Opus, served via Amazon Bedrock",
+  },
+  {
+    id: "sfdc_ai__DefaultBedrockAnthropicClaude45Haiku",
+    label: "Claude Haiku 4.5 (Bedrock)",
+    description: "Fast, low-cost Anthropic Claude Haiku, via Amazon Bedrock",
+  },
+  {
+    id: "sfdc_ai__DefaultGPT55",
+    label: "GPT-5.5 (OpenAI)",
+    description: "OpenAI GPT-5.5",
+  },
 ]
 
 /** The model selected by default when the app loads. */
