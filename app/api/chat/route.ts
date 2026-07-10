@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import { auth } from "@clerk/nextjs/server"
 import { chatGenerate } from "@/lib/salesforce"
 import { MODELS } from "@/config/models"
 import type { ChatMessage, ChatRole } from "@/lib/types"
@@ -20,6 +21,12 @@ function isValidMessage(m: unknown): m is ChatMessage {
 }
 
 export async function POST(request: Request) {
+  // Require an authenticated Clerk session before hitting the Models API.
+  const { userId } = await auth()
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
   let payload: unknown
   try {
     payload = await request.json()

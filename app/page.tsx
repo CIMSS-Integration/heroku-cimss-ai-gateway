@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { ArrowUp } from "lucide-react"
+import { Show, SignIn, UserButton } from "@clerk/nextjs"
 
 import {
   ChatContainerContent,
@@ -79,32 +80,53 @@ export default function ChatPage() {
   const activeModel = MODELS.find((m) => m.id === model)
 
   return (
-    <div className="mx-auto flex h-dvh w-full max-w-3xl flex-col">
-      <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
-        <div>
-          <h1 className="text-sm font-semibold">Salesforce Models API Chat</h1>
-          {activeModel?.description && (
-            <p className="text-muted-foreground text-xs">
-              {activeModel.description}
+    <>
+      <Show when="signed-out">
+        <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
+          <div className="text-center">
+            <h1 className="text-xl font-bold">Salesforce Models API Chat</h1>
+            <p className="text-muted-foreground text-sm">
+              Sign in to chat with Salesforce-hosted LLMs.
             </p>
-          )}
+          </div>
+          <SignIn routing="hash" />
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-muted-foreground hidden sm:inline">Model</span>
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            disabled={isLoading}
-            className="border-input bg-background focus-visible:ring-ring rounded-md border px-2 py-1.5 text-sm shadow-xs focus-visible:ring-2 focus-visible:outline-none disabled:opacity-60"
-          >
-            {MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </header>
+      </Show>
+
+      <Show when="signed-in">
+        <div className="mx-auto flex h-dvh w-full max-w-3xl flex-col">
+          <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
+            <div>
+              <h1 className="text-sm font-semibold">
+                Salesforce Models API Chat
+              </h1>
+              {activeModel?.description && (
+                <p className="text-muted-foreground text-xs">
+                  {activeModel.description}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground hidden sm:inline">
+                  Model
+                </span>
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={isLoading}
+                  className="border-input bg-background focus-visible:ring-ring rounded-md border px-2 py-1.5 text-sm shadow-xs focus-visible:ring-2 focus-visible:outline-none disabled:opacity-60"
+                >
+                  {MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <UserButton />
+            </div>
+          </header>
 
       <div className="relative flex-1 overflow-hidden">
         <ChatContainerRoot className="h-full">
@@ -197,6 +219,8 @@ export default function ChatPage() {
           Powered by Salesforce Models API · prompt-kit
         </p>
       </div>
-    </div>
+        </div>
+      </Show>
+    </>
   )
 }
