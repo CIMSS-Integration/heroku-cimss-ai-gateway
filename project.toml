@@ -1,0 +1,7 @@
+# Heroku Cloud Native Buildpack (Fir) configuration.
+# Expose config vars during the build so Next.js can inline NEXT_PUBLIC_* values
+# (e.g. NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) into the client bundle at `next build`.
+# Without this, CNB builds only see config vars at runtime, and the browser-side
+# Clerk key would be missing.
+[com.heroku.build.labs]
+build_config_vars = true
