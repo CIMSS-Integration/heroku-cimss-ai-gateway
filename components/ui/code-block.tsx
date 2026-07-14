@@ -1,6 +1,8 @@
 "use client"
 
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { Check, Copy } from "lucide-react"
 import React, { useEffect, useState } from "react"
 import { codeToHtml } from "shiki"
 
@@ -91,4 +93,41 @@ function CodeBlockGroup({
   )
 }
 
-export { CodeBlockGroup, CodeBlockCode, CodeBlock }
+export type CodeBlockCopyButtonProps = {
+  code: string
+  className?: string
+}
+
+function CodeBlockCopyButton({ code, className }: CodeBlockCopyButtonProps) {
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 2000)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+    } catch {
+      // Clipboard unavailable (e.g. non-secure context) — silently ignore.
+    }
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      className={cn("text-muted-foreground", className)}
+      aria-label={copied ? "Copied" : "Copy code"}
+      onClick={handleCopy}
+    >
+      {copied ? <Check /> : <Copy />}
+    </Button>
+  )
+}
+
+export { CodeBlockGroup, CodeBlockCode, CodeBlock, CodeBlockCopyButton }

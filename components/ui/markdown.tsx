@@ -4,7 +4,12 @@ import { memo, useId, useMemo } from "react"
 import ReactMarkdown, { Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
-import { CodeBlock, CodeBlockCode } from "./code-block"
+import {
+  CodeBlock,
+  CodeBlockCode,
+  CodeBlockCopyButton,
+  CodeBlockGroup,
+} from "./code-block"
 
 export type MarkdownProps = {
   children: string
@@ -45,10 +50,17 @@ const INITIAL_COMPONENTS: Partial<Components> = {
     }
 
     const language = extractLanguage(className)
+    const code = children as string
 
     return (
       <CodeBlock className={className}>
-        <CodeBlockCode code={children as string} language={language} />
+        <CodeBlockGroup className="border-border border-b px-4 py-1.5">
+          <span className="text-muted-foreground font-mono text-xs">
+            {language}
+          </span>
+          <CodeBlockCopyButton code={code} />
+        </CodeBlockGroup>
+        <CodeBlockCode code={code} language={language} />
       </CodeBlock>
     )
   },
