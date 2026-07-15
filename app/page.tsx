@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { ArrowUp } from "lucide-react"
 import { Show, SignIn, UserButton } from "@clerk/nextjs"
 
@@ -28,11 +28,54 @@ import type { ChatMessage } from "@/lib/types"
 export default function ChatPage() {
   const [model, setModel] = useState(DEFAULT_MODEL)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [isResuming, setIsResuming] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const canSend = input.trim().length > 0 && !isLoading
+
+  // Resume the user's last chat (if any) on load instead of starting blank.
+  useEffect(() => {
+    let cancelled = false
+
+    async function resume() {
+      try {
+        const res = await fetch("/api/chat/session")
+        if (!res.ok) return
+        const data = await res.json()
+        const session = data?.session as {
+          id: string
+          model: string
+          messages: ChatMessage[]
+        } | null
+        if (!cancelled && session) {
+          setSessionId(session.id)
+          setMessages(session.messages)
+          if (MODELS.some((m) => m.id === session.model)) {
+            setModel(session.model)
+          }
+        }
+      } catch {
+        // No saved session reachable — fall back to a blank chat.
+      } finally {
+        if (!cancelled) setIsResuming(false)
+      }
+    }
+
+    resume()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  function handleNewChat() {
+    setSessionId(null)
+    setMessages([])
+    setInput("")
+    setError(null)
+  }
 
   async function handleSubmit() {
     const text = input.trim()
@@ -54,12 +97,17 @@ export default function ChatPage() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages: requestMessages }),
+        body: JSON.stringify({
+          model,
+          messages: requestMessages,
+          sessionId,
+        }),
       })
       const data = await res.json()
       if (!res.ok) {
         throw new Error(data?.error ?? `Request failed (${res.status})`)
       }
+      if (data.sessionId) setSessionId(data.sessionId)
       setMessages((prev) => [
         ...prev,
         {
@@ -107,6 +155,15 @@ export default function ChatPage() {
               )}
             </div>
             <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleNewChat}
+                disabled={isLoading || isResuming || messages.length === 0}
+              >
+                New chat
+              </Button>
               <label className="flex items-center gap-2 text-sm">
                 <span className="text-muted-foreground hidden sm:inline">
                   Model
@@ -131,13 +188,20 @@ export default function ChatPage() {
       <div className="relative flex-1 overflow-hidden">
         <ChatContainerRoot className="h-full">
           <ChatContainerContent className="space-y-6 px-4 py-6">
-            {messages.length === 0 && !isLoading && (
+            {isResuming ? (
               <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
-                <p className="text-base font-medium">Start a conversation</p>
-                <p className="text-sm">
-                  Messages are sent to the Salesforce Models API.
-                </p>
+                <Loader variant="typing" />
               </div>
+            ) : (
+              messages.length === 0 &&
+              !isLoading && (
+                <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
+                  <p className="text-base font-medium">Start a conversation</p>
+                  <p className="text-sm">
+                    Messages are sent to the Salesforce Models API.
+                  </p>
+                </div>
+              )
             )}
 
             {messages.map((message, index) =>

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { chatGenerate } from "@/lib/salesforce"
+import { createSession, appendMessages } from "@/lib/chat-store"
+import { getSalesforceUsername } from "@/lib/identity"
 import { MODELS } from "@/config/models"
 import type { ChatMessage, ChatRole } from "@/lib/types"
 
@@ -34,9 +36,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { model, messages } = (payload ?? {}) as {
+  const { model, messages, sessionId } = (payload ?? {}) as {
     model?: unknown
     messages?: unknown
+    sessionId?: unknown
   }
 
   if (typeof model !== "string" || !MODELS.some((m) => m.id === model)) {
@@ -60,9 +63,54 @@ export async function POST(request: Request) {
     )
   }
 
+  // The client sends `null` (not just omitting the field) for a fresh chat —
+  // JSON.stringify serializes a null useState value as literal `null`.
+  if (sessionId != null && typeof sessionId !== "string") {
+    return NextResponse.json(
+      { error: "`sessionId` must be a string if provided." },
+      { status: 400 }
+    )
+  }
+  const activeSessionIdInput = (sessionId ?? undefined) as string | undefined
+
+  const typedMessages = messages as ChatMessage[]
+  // The client always sends the full history with the new user turn last —
+  // that's the only message from this request we need to persist ourselves.
+  const newestUserMessage = typedMessages[typedMessages.length - 1]
+
   try {
-    const { content } = await chatGenerate(model, messages as ChatMessage[])
-    return NextResponse.json({ content })
+    const { content } = await chatGenerate(model, typedMessages)
+    const assistantMessage: ChatMessage = { role: "assistant", content }
+
+    let activeSessionId = activeSessionIdInput
+    try {
+      const sfUsername = await getSalesforceUsername()
+      if (!sfUsername) {
+        // No linked Salesforce account (SSO/metadata gap) — chat still
+        // works, it just isn't persisted for this turn.
+        console.error(
+          `[/api/chat] no linked Salesforce account for Clerk user ${userId}; skipping persistence`
+        )
+      } else {
+        if (!activeSessionId) {
+          activeSessionId = await createSession(
+            sfUsername,
+            model,
+            newestUserMessage.content
+          )
+        }
+        await appendMessages(activeSessionId, sfUsername, [
+          newestUserMessage,
+          assistantMessage,
+        ])
+      }
+    } catch (persistError) {
+      // A storage hiccup shouldn't fail a chat turn the user is actively
+      // waiting on — log it and let the response through unsaved.
+      console.error("[/api/chat] failed to persist chat turn", persistError)
+    }
+
+    return NextResponse.json({ content, sessionId: activeSessionId })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
