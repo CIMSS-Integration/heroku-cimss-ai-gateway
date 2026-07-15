@@ -1,11 +1,15 @@
 import "server-only"
 import { pool } from "./db"
-import type { ChatMessage, ChatRole, ChatSessionSummary } from "./types"
+import type {
+  ChatMessageWithModel,
+  ChatRole,
+  ChatSessionSummary,
+} from "./types"
 
 export type { ChatSessionSummary }
 
 export type ChatSessionWithMessages = ChatSessionSummary & {
-  messages: ChatMessage[]
+  messages: ChatMessageWithModel[]
 }
 
 const TITLE_MAX_LENGTH = 80
@@ -17,14 +21,17 @@ function deriveTitle(firstUserMessage: string): string {
     : trimmed
 }
 
-async function getMessages(sessionId: string): Promise<ChatMessage[]> {
+async function getMessages(
+  sessionId: string
+): Promise<ChatMessageWithModel[]> {
   const result = await pool.query(
-    `select role, content from ai.chat_message where session_id = $1 order by seq asc`,
+    `select role, content, model from ai.chat_message where session_id = $1 order by seq asc`,
     [sessionId]
   )
   return result.rows.map((row) => ({
     role: row.role as ChatRole,
     content: row.content as string,
+    model: (row.model as string | null) ?? null,
   }))
 }
 
@@ -100,17 +107,32 @@ export async function createSession(
 }
 
 /**
- * Appends messages to a session on behalf of a user, continuing the seq
- * counter. Locks the session row for the duration of the transaction so
- * concurrent requests (e.g. two tabs) can't race on seq, and verifies the
- * session actually belongs to sfUsername before writing anything.
+ * Reconciles a session's stored messages with the full conversation the client
+ * currently holds, then records the newest model as the session's model.
+ *
+ * `conversation` is the entire user/assistant history as the client sees it,
+ * ending with the just-generated assistant reply. Rather than blindly appending
+ * the last turn (which permanently loses any earlier turn whose write was
+ * skipped or failed — audit #1/#3), we compare against what's stored and insert
+ * whatever is missing:
+ *
+ *  - If the stored rows are a clean prefix of `conversation` (the normal case,
+ *    and the recover-a-skipped-turn case), we append everything past the prefix.
+ *  - If they diverge (e.g. two tabs interleaving — audit #7), we never rewrite
+ *    or drop existing rows; we only append the two genuinely-new trailing turns
+ *    so nothing the user just did is lost.
+ *
+ * The session row is locked for the transaction so concurrent requests can't
+ * race on `seq`, and ownership (sf_username, not archived) is verified before
+ * any write.
  */
-export async function appendMessages(
+export async function appendConversation(
   sessionId: string,
   sfUsername: string,
-  messages: ChatMessage[]
+  conversation: ChatMessageWithModel[],
+  latestModel: string
 ): Promise<void> {
-  if (messages.length === 0) return
+  if (conversation.length === 0) return
 
   const client = await pool.connect()
   try {
@@ -126,19 +148,54 @@ export async function appendMessages(
       throw new Error(`Session ${sessionId} not found for this user`)
     }
 
-    const seqResult = await client.query(
-      `select coalesce(max(seq), 0) as max_seq from ai.chat_message where session_id = $1`,
+    const existingResult = await client.query(
+      `select role, content, seq from ai.chat_message
+       where session_id = $1 order by seq asc`,
       [sessionId]
     )
-    let seq = seqResult.rows[0].max_seq as number
+    const existing = existingResult.rows as Array<{
+      role: string
+      content: string
+      seq: number
+    }>
 
-    for (const message of messages) {
+    // How many stored rows form a clean prefix of the client's conversation?
+    let prefix = 0
+    while (
+      prefix < existing.length &&
+      prefix < conversation.length &&
+      existing[prefix].role === conversation[prefix].role &&
+      existing[prefix].content === conversation[prefix].content
+    ) {
+      prefix += 1
+    }
+
+    const toInsert =
+      prefix === existing.length
+        ? // Stored rows are a clean prefix — append everything after them
+          // (covers the happy path and backfilling skipped earlier turns).
+          conversation.slice(existing.length)
+        : // Divergence — don't touch existing rows; append only the new pair.
+          conversation.slice(-2)
+
+    let seq =
+      existing.length === 0 ? 0 : existing[existing.length - 1].seq
+
+    for (const message of toInsert) {
       seq += 1
       await client.query(
-        `insert into ai.chat_message (session_id, role, content, seq) values ($1, $2, $3, $4)`,
-        [sessionId, message.role, message.content, seq]
+        `insert into ai.chat_message (session_id, role, content, seq, model)
+         values ($1, $2, $3, $4, $5)`,
+        [sessionId, message.role, message.content, seq, message.model]
       )
     }
+
+    // Record the model behind the newest reply so resume reflects the last
+    // model used, not whichever produced the first reply (audit #4).
+    await client.query(
+      `update ai.chat_session set model = $2, updated_at = now() where id = $1`,
+      [sessionId, latestModel]
+    )
 
     await client.query("commit")
   } catch (err) {
