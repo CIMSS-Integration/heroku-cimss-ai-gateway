@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { getLatestSession } from "@/lib/chat-store"
+import { listSessions } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
 
 // Same rationale as app/api/chat/route.ts — pg needs the Node runtime.
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-/** Returns the user's most recently active chat, if any, so the client can resume it. */
+/** Lists the signed-in user's chats, most recently active first, for the sidebar. */
 export async function GET() {
   const { userId } = await auth()
   if (!userId) {
@@ -16,13 +16,13 @@ export async function GET() {
 
   try {
     const sfUsername = await getSalesforceUsername()
-    // No linked Salesforce account → nothing to resume, not an error.
-    const session = sfUsername ? await getLatestSession(sfUsername) : null
-    return NextResponse.json({ session })
+    // No linked Salesforce account → no chats to show, not an error.
+    const sessions = sfUsername ? await listSessions(sfUsername) : []
+    return NextResponse.json({ sessions })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
-    console.error("[/api/chat/session]", message)
+    console.error("[/api/chat/sessions]", message)
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }

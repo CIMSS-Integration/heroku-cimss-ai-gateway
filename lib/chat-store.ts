@@ -1,11 +1,10 @@
 import "server-only"
 import { pool } from "./db"
-import type { ChatMessage, ChatRole } from "./types"
+import type { ChatMessage, ChatRole, ChatSessionSummary } from "./types"
 
-export type ChatSessionWithMessages = {
-  id: string
-  model: string
-  title: string | null
+export type { ChatSessionSummary }
+
+export type ChatSessionWithMessages = ChatSessionSummary & {
   messages: ChatMessage[]
 }
 
@@ -29,17 +28,35 @@ async function getMessages(sessionId: string): Promise<ChatMessage[]> {
   }))
 }
 
-/** Most recently active, non-archived session for a user — used to resume where they left off. */
-export async function getLatestSession(
+/** All of a user's non-archived sessions, most recently active first — powers the sidebar. */
+export async function listSessions(
+  sfUsername: string
+): Promise<ChatSessionSummary[]> {
+  const result = await pool.query(
+    `select id, model, title, updated_at
+     from ai.chat_session
+     where sf_username = $1 and archived_at is null
+     order by updated_at desc`,
+    [sfUsername]
+  )
+  return result.rows.map((row) => ({
+    id: row.id as string,
+    model: row.model as string,
+    title: row.title as string | null,
+    updatedAt: (row.updated_at as Date).toISOString(),
+  }))
+}
+
+/** A single session's messages, scoped to its owner so one user can't load another's chat. */
+export async function getSession(
+  sessionId: string,
   sfUsername: string
 ): Promise<ChatSessionWithMessages | null> {
   const result = await pool.query(
-    `select id, model, title
+    `select id, model, title, updated_at
      from ai.chat_session
-     where sf_username = $1 and archived_at is null
-     order by updated_at desc
-     limit 1`,
-    [sfUsername]
+     where id = $1 and sf_username = $2 and archived_at is null`,
+    [sessionId, sfUsername]
   )
   const session = result.rows[0]
   if (!session) return null
@@ -48,8 +65,23 @@ export async function getLatestSession(
     id: session.id as string,
     model: session.model as string,
     title: session.title as string | null,
+    updatedAt: (session.updated_at as Date).toISOString(),
     messages: await getMessages(session.id),
   }
+}
+
+/** Soft-deletes a session. Returns false if it doesn't exist / isn't owned by this user. */
+export async function archiveSession(
+  sessionId: string,
+  sfUsername: string
+): Promise<boolean> {
+  const result = await pool.query(
+    `update ai.chat_session
+     set archived_at = now()
+     where id = $1 and sf_username = $2 and archived_at is null`,
+    [sessionId, sfUsername]
+  )
+  return result.rowCount !== null && result.rowCount > 0
 }
 
 /** Creates a new session, titled from the first user message. */
