@@ -1,25 +1,37 @@
 import "server-only"
 import { currentUser } from "@clerk/nextjs/server"
 
-// Same Clerk instance + custom OIDC connection as the sibling
-// react-glb-accounting app (mimit-prod branch) — Salesforce SSO surfaces as
-// a linked external account, not a Clerk-native field. NOTE: the Backend API
-// (what currentUser() from @clerk/nextjs/server calls) prefixes the strategy
-// with "oauth_" — confirmed via a direct Backend API call — unlike the
-// frontend SDK string the sibling app checks against client-side.
-const SALESFORCE_PROVIDER = "oauth_custom_salesforce_mimit_prod"
+export type SalesforceIdentity = {
+  /** The linked Salesforce username, or null if none is linked. */
+  sfUsername: string | null
+  /** All linked external-account provider slugs (for diagnostics / the blocked screen). */
+  linkedProviders: string[]
+}
 
 /**
- * Resolves the signed-in user's Salesforce username via their linked Clerk
- * external account, or null if they aren't signed in or haven't linked one.
- * Callers are expected to have already gated on `auth()` for the plain
- * signed-in check — this is only for the SF-username-keyed persistence path,
- * and its absence should degrade (skip persistence) rather than block chat.
+ * Resolves the signed-in user's Salesforce identity from their linked Clerk
+ * external accounts.
+ *
+ * Clerk names a custom OAuth connection `oauth_custom_<slug>`, and the slug
+ * differs between the dev Clerk instance (`oauth_custom_salesforce_mimit_prod`,
+ * confirmed via the Backend API) and the production instance on
+ * `clerk.themimit.com`. Matching a hardcoded string therefore fails on prod, so
+ * we match any provider whose slug mentions "salesforce" — robust across
+ * instances, and a user won't have a non-Salesforce provider we'd confuse.
  */
-export async function getSalesforceUsername(): Promise<string | null> {
+export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
   const user = await currentUser()
-  const sfAccount = user?.externalAccounts.find(
-    (account) => account.provider === SALESFORCE_PROVIDER
+  const accounts = user?.externalAccounts ?? []
+  const linkedProviders = accounts
+    .map((a) => a.provider)
+    .filter((p): p is string => Boolean(p))
+  const sfAccount = accounts.find((a) =>
+    a.provider?.toLowerCase().includes("salesforce")
   )
-  return sfAccount?.username ?? null
+  return { sfUsername: sfAccount?.username ?? null, linkedProviders }
+}
+
+/** Convenience wrapper: just the Salesforce username (null if not linked). */
+export async function getSalesforceUsername(): Promise<string | null> {
+  return (await getSalesforceIdentity()).sfUsername
 }

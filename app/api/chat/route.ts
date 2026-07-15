@@ -73,63 +73,65 @@ export async function POST(request: Request) {
   }
   const activeSessionIdInput = (sessionId ?? undefined) as string | undefined
 
+  // This app requires a linked Salesforce account: every chat is logged under a
+  // Salesforce username, so we refuse to generate anything we couldn't attribute
+  // and store. No SF account → 403, before the model is ever called (no gap).
+  const sfUsername = await getSalesforceUsername()
+  if (!sfUsername) {
+    return NextResponse.json(
+      {
+        error:
+          "This app requires a linked Salesforce account, which we couldn't find for your login.",
+      },
+      { status: 403 }
+    )
+  }
+
   const typedMessages = messages as ChatMessage[]
   // The full user/assistant conversation as the client currently holds it
   // (system turns are re-derived per request, never stored).
   const conversation = typedMessages.filter((m) => m.role !== "system")
 
+  let content: string
   try {
-    const { content } = await chatGenerate(model, typedMessages)
-
-    // The whole conversation plus the just-generated reply. Only the reply's
-    // model is known here; earlier turns carry null (unknown/backfill).
-    const fullConversation: ChatMessageWithModel[] = [
-      ...conversation.map((m) => ({ ...m, model: null })),
-      { role: "assistant" as ChatRole, content, model },
-    ]
-
-    let activeSessionId = activeSessionIdInput
-    let persisted = false
-    try {
-      const sfUsername = await getSalesforceUsername()
-      if (!sfUsername) {
-        // No linked Salesforce account (SSO/metadata gap) — chat still
-        // works, it just isn't persisted. Reported to the client so the UI
-        // can warn instead of silently losing the conversation (audit #2).
-        console.error(
-          `[/api/chat] no linked Salesforce account for Clerk user ${userId}; skipping persistence`
-        )
-      } else {
-        if (!activeSessionId) {
-          activeSessionId = await createSession(
-            sfUsername,
-            model,
-            conversation[0]?.content ?? content
-          )
-        }
-        await appendConversation(
-          activeSessionId,
-          sfUsername,
-          fullConversation,
-          model
-        )
-        persisted = true
-      }
-    } catch (persistError) {
-      // A storage hiccup shouldn't fail a chat turn the user is actively
-      // waiting on — log it and let the response through, flagged unsaved.
-      console.error("[/api/chat] failed to persist chat turn", persistError)
-    }
-
-    return NextResponse.json({
-      content,
-      sessionId: activeSessionId,
-      persisted,
-    })
+    ;({ content } = await chatGenerate(model, typedMessages))
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
-    console.error("[/api/chat]", message)
+    console.error("[/api/chat] model call failed", message)
     return NextResponse.json({ error: message }, { status: 502 })
   }
+
+  // The whole conversation plus the just-generated reply. Only the reply's
+  // model is known here; earlier turns carry null (unknown/backfill).
+  const fullConversation: ChatMessageWithModel[] = [
+    ...conversation.map((m) => ({ ...m, model: null })),
+    { role: "assistant" as ChatRole, content, model },
+  ]
+
+  // Persistence is on the critical path — we don't return a reply we failed to
+  // log. On failure the client can retry; reconciliation backfills without
+  // duplicating (matches on role+content prefix), so no gap and no dupe.
+  let activeSessionId = activeSessionIdInput
+  try {
+    if (!activeSessionId) {
+      activeSessionId = await createSession(
+        sfUsername,
+        model,
+        conversation[0]?.content ?? content
+      )
+    }
+    await appendConversation(activeSessionId, sfUsername, fullConversation, model)
+  } catch (persistError) {
+    console.error("[/api/chat] failed to persist chat turn", persistError)
+    return NextResponse.json(
+      {
+        error:
+          "Your message was answered but couldn't be saved. Please try again.",
+      },
+      { status: 500 }
+    )
+  }
+
+  return NextResponse.json({ content, sessionId: activeSessionId })
 }

@@ -36,6 +36,28 @@ function modelLabel(id: string | null): string | null {
   return MODELS.find((m) => m.id === id)?.label ?? id
 }
 
+/** Parse a response as JSON without throwing on an HTML error page (e.g. a
+ *  Heroku H12 timeout returns `<!DOCTYPE …>`, not JSON). */
+async function readJson(res: Response): Promise<Record<string, unknown> | null> {
+  try {
+    return (await res.json()) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function errorFor(
+  res: Response,
+  data: Record<string, unknown> | null,
+  fallback: string
+): string {
+  if (typeof data?.error === "string") return data.error
+  if (res.status === 503 || res.status === 504) {
+    return "The model took too long and the server timed out. Try a shorter prompt or a faster model."
+  }
+  return `${fallback} (${res.status})`
+}
+
 export default function ChatPage() {
   const [model, setModel] = useState(DEFAULT_MODEL)
   const [messages, setMessages] = useState<ChatMessageWithModel[]>([])
@@ -47,7 +69,13 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [isResuming, setIsResuming] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [saveWarning, setSaveWarning] = useState<string | null>(null)
+
+  // Identity gate: this app requires a linked Salesforce account so every chat
+  // is logged under a Salesforce username. Until we've checked, show a loader;
+  // if none is linked, block the chat entirely.
+  const [identityChecked, setIdentityChecked] = useState(false)
+  const [sfUsername, setSfUsername] = useState<string | null>(null)
+  const [linkedProviders, setLinkedProviders] = useState<string[]>([])
 
   const canSend = input.trim().length > 0 && !isLoading
   const sidebarDisabled = isLoading || isResuming
@@ -56,7 +84,7 @@ export default function ChatPage() {
     try {
       const res = await fetch("/api/chat/sessions")
       if (!res.ok) return []
-      const data = await res.json()
+      const data = await readJson(res)
       const list = (data?.sessions as ChatSessionSummary[]) ?? []
       setSessions(list)
       return list
@@ -68,11 +96,10 @@ export default function ChatPage() {
   async function loadSession(id: string) {
     setIsResuming(true)
     setError(null)
-    setSaveWarning(null)
     try {
       const res = await fetch(`/api/chat/sessions/${id}`)
       if (!res.ok) throw new Error()
-      const data = await res.json()
+      const data = await readJson(res)
       const session = data?.session as {
         id: string
         model: string
@@ -93,11 +120,41 @@ export default function ChatPage() {
     }
   }
 
-  // On load: fetch the sidebar list and resume the most recent chat, if any.
+  // On load: verify a Salesforce account is linked, then fetch the sidebar list
+  // and resume the most recent chat.
   useEffect(() => {
     let cancelled = false
 
     async function init() {
+      let identity: { sfUsername: string | null; linkedProviders: string[] } = {
+        sfUsername: null,
+        linkedProviders: [],
+      }
+      try {
+        const res = await fetch("/api/identity")
+        const data = await readJson(res)
+        if (res.ok && data) {
+          identity = {
+            sfUsername: (data.sfUsername as string | null) ?? null,
+            linkedProviders: (data.linkedProviders as string[]) ?? [],
+          }
+        }
+      } catch {
+        // Treated as "no Salesforce account" below.
+      }
+      if (cancelled) return
+
+      setSfUsername(identity.sfUsername)
+      setLinkedProviders(identity.linkedProviders)
+      setIdentityChecked(true)
+
+      if (!identity.sfUsername) {
+        // Blocked — no chat to load.
+        setIsResuming(false)
+        setIsLoadingSessions(false)
+        return
+      }
+
       const list = await refreshSessions()
       if (cancelled) return
       setIsLoadingSessions(false)
@@ -119,7 +176,6 @@ export default function ChatPage() {
     setMessages([])
     setInput("")
     setError(null)
-    setSaveWarning(null)
     setIsSidebarOpen(false)
   }
 
@@ -183,21 +239,16 @@ export default function ChatPage() {
           sessionId,
         }),
       })
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(data?.error ?? `Request failed (${res.status})`)
+      const data = await readJson(res)
+      if (!res.ok || !data) {
+        throw new Error(errorFor(res, data, "Request failed"))
       }
-      if (data.sessionId) setSessionId(data.sessionId)
-      setSaveWarning(
-        data.persisted === false
-          ? "This chat isn't being saved — no linked Salesforce account was found for your login."
-          : null
-      )
+      if (data.sessionId) setSessionId(data.sessionId as string)
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: data.content || "_(empty response)_",
+          content: (data.content as string) || "_(empty response)_",
           model: modelUsed,
         },
       ])
@@ -222,7 +273,7 @@ export default function ChatPage() {
           <div className="text-center">
             <h1 className="text-xl font-bold">Salesforce Models API Chat</h1>
             <p className="text-muted-foreground text-sm">
-              Sign in to chat with Salesforce-hosted LLMs.
+              Sign in with Salesforce to chat with Salesforce-hosted LLMs.
             </p>
           </div>
           <SignIn routing="hash" />
@@ -230,191 +281,209 @@ export default function ChatPage() {
       </Show>
 
       <Show when="signed-in">
-        <div className="flex h-dvh w-full">
-          {isSidebarOpen && (
-            <div
-              className="fixed inset-0 z-30 bg-black/30 md:hidden"
-              onClick={() => setIsSidebarOpen(false)}
-            />
-          )}
-
-          <div
-            className={cn(
-              "bg-background fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 md:static md:z-auto md:w-64 md:shrink-0 md:translate-x-0",
-              isSidebarOpen ? "translate-x-0" : "-translate-x-full"
-            )}
-          >
-            <ChatSidebar
-              sessions={sessions}
-              activeSessionId={sessionId}
-              isLoadingSessions={isLoadingSessions}
-              disabled={sidebarDisabled}
-              onSelect={handleSelectSession}
-              onNewChat={handleNewChat}
-              onDelete={handleDeleteSession}
-            />
+        {!identityChecked ? (
+          <div className="flex min-h-dvh items-center justify-center">
+            <Loader variant="typing" />
           </div>
+        ) : !sfUsername ? (
+          <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
+            <div className="max-w-md space-y-3 text-center">
+              <h1 className="text-xl font-bold">Salesforce account required</h1>
+              <p className="text-muted-foreground text-sm">
+                You&apos;re signed in, but this app requires a linked Salesforce
+                account and we couldn&apos;t find one for your login. Please sign
+                in with Salesforce, or contact your administrator.
+              </p>
+              {linkedProviders.length > 0 && (
+                <p className="text-muted-foreground text-xs">
+                  Linked sign-in providers: {linkedProviders.join(", ")}
+                </p>
+              )}
+            </div>
+            <UserButton />
+          </div>
+        ) : (
+          <div className="flex h-dvh w-full">
+            {isSidebarOpen && (
+              <div
+                className="fixed inset-0 z-30 bg-black/30 md:hidden"
+                onClick={() => setIsSidebarOpen(false)}
+              />
+            )}
 
-          <div className="mx-auto flex h-dvh w-full max-w-3xl flex-1 flex-col">
-            <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="md:hidden"
-                  onClick={() => setIsSidebarOpen((open) => !open)}
-                  aria-label="Toggle chat list"
-                >
-                  <PanelLeft className="h-4 w-4" />
-                </Button>
-                <div>
-                  <h1 className="text-sm font-semibold">
-                    Salesforce Models API Chat
-                  </h1>
-                  {activeModel?.description && (
-                    <p className="text-muted-foreground text-xs">
-                      {activeModel.description}
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-sm">
-                  <span className="text-muted-foreground hidden sm:inline">
-                    Model
-                  </span>
-                  <select
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    disabled={isLoading}
-                    className="border-input bg-background focus-visible:ring-ring rounded-md border px-2 py-1.5 text-sm shadow-xs focus-visible:ring-2 focus-visible:outline-none disabled:opacity-60"
+            <div
+              className={cn(
+                "bg-background fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 md:static md:z-auto md:w-64 md:shrink-0 md:translate-x-0",
+                isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+              )}
+            >
+              <ChatSidebar
+                sessions={sessions}
+                activeSessionId={sessionId}
+                isLoadingSessions={isLoadingSessions}
+                disabled={sidebarDisabled}
+                onSelect={handleSelectSession}
+                onNewChat={handleNewChat}
+                onDelete={handleDeleteSession}
+              />
+            </div>
+
+            <div className="mx-auto flex h-dvh w-full max-w-3xl flex-1 flex-col">
+              <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="md:hidden"
+                    onClick={() => setIsSidebarOpen((open) => !open)}
+                    aria-label="Toggle chat list"
                   >
-                    {MODELS.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <UserButton />
-              </div>
-            </header>
+                    <PanelLeft className="h-4 w-4" />
+                  </Button>
+                  <div>
+                    <h1 className="text-sm font-semibold">
+                      Salesforce Models API Chat
+                    </h1>
+                    {activeModel?.description && (
+                      <p className="text-muted-foreground text-xs">
+                        {activeModel.description}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <span className="text-muted-foreground hidden sm:inline">
+                      Model
+                    </span>
+                    <select
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      disabled={isLoading}
+                      className="border-input bg-background focus-visible:ring-ring rounded-md border px-2 py-1.5 text-sm shadow-xs focus-visible:ring-2 focus-visible:outline-none disabled:opacity-60"
+                    >
+                      {MODELS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <UserButton />
+                </div>
+              </header>
 
-            <div className="relative flex-1 overflow-hidden">
-              <ChatContainerRoot className="h-full">
-                <ChatContainerContent className="space-y-6 px-4 py-6">
-                  {isResuming ? (
-                    <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
-                      <Loader variant="typing" />
-                    </div>
-                  ) : (
-                    messages.length === 0 &&
-                    !isLoading && (
+              <div className="relative flex-1 overflow-hidden">
+                <ChatContainerRoot className="h-full">
+                  <ChatContainerContent className="space-y-6 px-4 py-6">
+                    {isResuming ? (
                       <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
-                        <p className="text-base font-medium">
-                          Start a conversation
-                        </p>
-                        <p className="text-sm">
-                          Messages are sent to the Salesforce Models API.
-                        </p>
+                        <Loader variant="typing" />
                       </div>
-                    )
-                  )}
-
-                  {messages.map((message, index) =>
-                    message.role === "user" ? (
-                      <Message key={index} className="justify-end">
-                        <MessageContent className="bg-primary text-primary-foreground max-w-[80%]">
-                          {message.content}
-                        </MessageContent>
-                      </Message>
                     ) : (
-                      <Message key={index} className="justify-start">
+                      messages.length === 0 &&
+                      !isLoading && (
+                        <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
+                          <p className="text-base font-medium">
+                            Start a conversation
+                          </p>
+                          <p className="text-sm">
+                            Messages are sent to the Salesforce Models API.
+                          </p>
+                        </div>
+                      )
+                    )}
+
+                    {messages.map((message, index) =>
+                      message.role === "user" ? (
+                        <Message key={index} className="justify-end">
+                          <MessageContent className="bg-primary text-primary-foreground max-w-[80%]">
+                            {message.content}
+                          </MessageContent>
+                        </Message>
+                      ) : (
+                        <Message key={index} className="justify-start">
+                          <MessageAvatar
+                            src=""
+                            alt="Assistant"
+                            fallback="AI"
+                            className="bg-muted"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <MessageContent
+                              markdown
+                              className="max-w-none bg-transparent p-0"
+                            >
+                              {message.content}
+                            </MessageContent>
+                            {modelLabel(message.model) && (
+                              <p className="text-muted-foreground mt-1 text-xs">
+                                {modelLabel(message.model)}
+                              </p>
+                            )}
+                          </div>
+                        </Message>
+                      )
+                    )}
+
+                    {isLoading && (
+                      <Message className="justify-start">
                         <MessageAvatar
                           src=""
                           alt="Assistant"
                           fallback="AI"
                           className="bg-muted"
                         />
-                        <div className="min-w-0 flex-1">
-                          <MessageContent
-                            markdown
-                            className="max-w-none bg-transparent p-0"
-                          >
-                            {message.content}
-                          </MessageContent>
-                          {modelLabel(message.model) && (
-                            <p className="text-muted-foreground mt-1 text-xs">
-                              {modelLabel(message.model)}
-                            </p>
-                          )}
+                        <div className="flex items-center pt-1.5">
+                          <Loader variant="typing" />
                         </div>
                       </Message>
-                    )
-                  )}
+                    )}
+                  </ChatContainerContent>
 
-                  {isLoading && (
-                    <Message className="justify-start">
-                      <MessageAvatar
-                        src=""
-                        alt="Assistant"
-                        fallback="AI"
-                        className="bg-muted"
-                      />
-                      <div className="flex items-center pt-1.5">
-                        <Loader variant="typing" />
-                      </div>
-                    </Message>
-                  )}
-                </ChatContainerContent>
+                  <div className="absolute right-4 bottom-4">
+                    <ScrollButton />
+                  </div>
+                </ChatContainerRoot>
+              </div>
 
-                <div className="absolute right-4 bottom-4">
-                  <ScrollButton />
-                </div>
-              </ChatContainerRoot>
-            </div>
-
-            <div className="px-4 pb-4">
-              {saveWarning && (
-                <div className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-                  {saveWarning}
-                </div>
-              )}
-              {error && (
-                <div className="border-destructive/40 bg-destructive/10 text-destructive mb-2 rounded-md border px-3 py-2 text-sm">
-                  {error}
-                </div>
-              )}
-              <PromptInput
-                value={input}
-                onValueChange={setInput}
-                isLoading={isLoading}
-                onSubmit={handleSubmit}
-                className="w-full"
-              >
-                <PromptInputTextarea placeholder="Send a message..." />
-                <PromptInputActions className="justify-end pt-2">
-                  <PromptInputAction tooltip="Send message">
-                    <Button
-                      type="button"
-                      size="icon"
-                      className="h-9 w-9 rounded-full"
-                      disabled={!canSend}
-                      onClick={handleSubmit}
-                      aria-label="Send message"
-                    >
-                      <ArrowUp className="h-4 w-4" />
-                    </Button>
-                  </PromptInputAction>
-                </PromptInputActions>
-              </PromptInput>
-              <p className="text-muted-foreground mt-2 text-center text-xs">
-                Powered by Salesforce Models API · prompt-kit
-              </p>
+              <div className="px-4 pb-4">
+                {error && (
+                  <div className="border-destructive/40 bg-destructive/10 text-destructive mb-2 rounded-md border px-3 py-2 text-sm">
+                    {error}
+                  </div>
+                )}
+                <PromptInput
+                  value={input}
+                  onValueChange={setInput}
+                  isLoading={isLoading}
+                  onSubmit={handleSubmit}
+                  className="w-full"
+                >
+                  <PromptInputTextarea placeholder="Send a message..." />
+                  <PromptInputActions className="justify-end pt-2">
+                    <PromptInputAction tooltip="Send message">
+                      <Button
+                        type="button"
+                        size="icon"
+                        className="h-9 w-9 rounded-full"
+                        disabled={!canSend}
+                        onClick={handleSubmit}
+                        aria-label="Send message"
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                    </PromptInputAction>
+                  </PromptInputActions>
+                </PromptInput>
+                <p className="text-muted-foreground mt-2 text-center text-xs">
+                  Powered by Salesforce Models API · prompt-kit
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </Show>
     </>
   )
