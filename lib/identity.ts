@@ -9,15 +9,22 @@ export type SalesforceIdentity = {
 }
 
 /**
+ * True if a Clerk external-account provider slug is this app's Salesforce SSO
+ * connection. Clerk names custom OAuth connections `oauth_custom_<slug>`, and
+ * the slug differs per Clerk instance — both confirmed from real logins:
+ *   - dev instance:               `oauth_custom_salesforce_mimit_prod`
+ *   - prod (clerk.themimit.com):  `oauth_custom_mimit_prod_sf`
+ * So we accept either the word "salesforce" or an "sf" token. A user of this
+ * app only ever links the Salesforce connection, so this won't misidentify.
+ */
+function isSalesforceProvider(provider: string | null | undefined): boolean {
+  const p = (provider ?? "").toLowerCase()
+  return p.includes("salesforce") || /(?:^|_)sf(?:_|$)/.test(p)
+}
+
+/**
  * Resolves the signed-in user's Salesforce identity from their linked Clerk
  * external accounts.
- *
- * Clerk names a custom OAuth connection `oauth_custom_<slug>`, and the slug
- * differs between the dev Clerk instance (`oauth_custom_salesforce_mimit_prod`,
- * confirmed via the Backend API) and the production instance on
- * `clerk.themimit.com`. Matching a hardcoded string therefore fails on prod, so
- * we match any provider whose slug mentions "salesforce" — robust across
- * instances, and a user won't have a non-Salesforce provider we'd confuse.
  */
 export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
   const user = await currentUser()
@@ -25,9 +32,7 @@ export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
   const linkedProviders = accounts
     .map((a) => a.provider)
     .filter((p): p is string => Boolean(p))
-  const sfAccount = accounts.find((a) =>
-    a.provider?.toLowerCase().includes("salesforce")
-  )
+  const sfAccount = accounts.find((a) => isSalesforceProvider(a.provider))
   return { sfUsername: sfAccount?.username ?? null, linkedProviders }
 }
 
