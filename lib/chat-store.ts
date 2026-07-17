@@ -91,6 +91,34 @@ export async function archiveSession(
   return result.rowCount !== null && result.rowCount > 0
 }
 
+/**
+ * Renames a session. Scoped to its owner so one user can't rename another's
+ * chat. The title is normalized/truncated the same way auto-titles are, so a
+ * manual rename can never exceed what the column already stores. `updated_at`
+ * is deliberately left untouched — renaming shouldn't reorder the sidebar.
+ *
+ * Returns the stored title (so the client reflects any truncation), or null if
+ * the session doesn't exist / isn't owned by this user.
+ */
+export async function renameSession(
+  sessionId: string,
+  sfUsername: string,
+  title: string
+): Promise<string | null> {
+  const finalTitle = deriveTitle(title)
+  if (!finalTitle) return null
+
+  const result = await pool.query(
+    `update ai.chat_session
+     set title = $3
+     where id = $1 and sf_username = $2 and archived_at is null
+     returning title`,
+    [sessionId, sfUsername, finalTitle]
+  )
+  const row = result.rows[0]
+  return row ? (row.title as string) : null
+}
+
 /** Creates a new session, titled from the first user message. */
 export async function createSession(
   sfUsername: string,

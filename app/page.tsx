@@ -189,6 +189,36 @@ export default function ChatPage() {
     loadSession(id)
   }
 
+  async function handleRenameSession(id: string, title: string) {
+    const trimmed = title.trim()
+    if (!trimmed) return
+
+    // Optimistically retitle in the sidebar, remembering the prior list so we
+    // can roll back if the write fails.
+    const previous = sessions
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s))
+    )
+
+    try {
+      const res = await fetch(`/api/chat/sessions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed }),
+      })
+      if (!res.ok) throw new Error()
+      const data = await readJson(res)
+      // Reflect the authoritative stored title (server normalizes/truncates).
+      const stored = (data?.title as string) ?? trimmed
+      setSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, title: stored } : s))
+      )
+    } catch {
+      setSessions(previous)
+      setError("Couldn't rename that chat.")
+    }
+  }
+
   async function handleDeleteSession(id: string) {
     if (!window.confirm("Delete this chat? This can't be undone.")) return
 
@@ -398,6 +428,7 @@ export default function ChatPage() {
                 onSelect={handleSelectSession}
                 onNewChat={handleNewChat}
                 onDelete={handleDeleteSession}
+                onRename={handleRenameSession}
               />
             </div>
 

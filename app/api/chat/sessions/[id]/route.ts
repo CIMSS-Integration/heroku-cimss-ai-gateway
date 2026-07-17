@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { archiveSession, getSession } from "@/lib/chat-store"
+import { archiveSession, getSession, renameSession } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
 
 // Same rationale as app/api/chat/route.ts — pg needs the Node runtime.
@@ -29,6 +29,47 @@ export async function GET(_request: Request, { params }: RouteParams) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
     console.error("[/api/chat/sessions/[id]] GET", message)
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}
+
+/** Renames a chat (updates its sidebar title). Body: `{ title: string }`. */
+export async function PATCH(request: Request, { params }: RouteParams) {
+  const { userId } = await auth()
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  const { id } = await params
+
+  let payload: unknown
+  try {
+    payload = await request.json()
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+  }
+
+  const { title } = (payload ?? {}) as { title?: unknown }
+  if (typeof title !== "string" || title.trim().length === 0) {
+    return NextResponse.json(
+      { error: "`title` must be a non-empty string." },
+      { status: 400 }
+    )
+  }
+
+  try {
+    const sfUsername = await getSalesforceUsername()
+    const newTitle = sfUsername
+      ? await renameSession(id, sfUsername, title)
+      : null
+    if (!newTitle) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+    }
+    return NextResponse.json({ ok: true, title: newTitle })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unexpected server error"
+    console.error("[/api/chat/sessions/[id]] PATCH", message)
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
