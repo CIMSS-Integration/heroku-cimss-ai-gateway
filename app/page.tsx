@@ -2,17 +2,14 @@
 
 import { useEffect, useState } from "react"
 import { ArrowUp, PanelLeft } from "lucide-react"
+import { Sparkles } from "lucide-react"
 import { Show, SignIn, UserButton } from "@clerk/nextjs"
 
 import {
   ChatContainerContent,
   ChatContainerRoot,
 } from "@/components/ui/chat-container"
-import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-} from "@/components/ui/message"
+import { Message, MessageContent } from "@/components/ui/message"
 import {
   PromptInput,
   PromptInputAction,
@@ -34,6 +31,14 @@ import type {
 function modelLabel(id: string | null): string | null {
   if (!id) return null
   return MODELS.find((m) => m.id === id)?.label ?? id
+}
+
+/** Time-of-day greeting for the empty state, in the viewer's local time. */
+function greetingText(): string {
+  const hour = new Date().getHours()
+  if (hour < 12) return "Good morning"
+  if (hour < 18) return "Good afternoon"
+  return "Good evening"
 }
 
 /** Parse a response as JSON without throwing on an HTML error page (e.g. a
@@ -264,15 +269,74 @@ export default function ChatPage() {
     }
   }
 
-  const activeModel = MODELS.find((m) => m.id === model)
+  // The greeting-centred empty state only appears once we've confirmed there's
+  // no conversation to show and nothing is in flight.
+  const showGreeting = !isResuming && !isLoading && messages.length === 0
+  const greeting = greetingText()
+
+  // The composer is rendered in two places — centred under the greeting, and
+  // pinned to the bottom during a conversation — so it lives in one variable.
+  const composer = (
+    <>
+      {error && (
+        <div className="border-destructive/40 bg-destructive/10 text-destructive mb-2 rounded-lg border px-3 py-2 text-sm">
+          {error}
+        </div>
+      )}
+      <PromptInput
+        value={input}
+        onValueChange={setInput}
+        isLoading={isLoading}
+        onSubmit={handleSubmit}
+        className="border-border bg-card w-full rounded-3xl shadow-sm"
+      >
+        <PromptInputTextarea placeholder="How can I help you today?" />
+        <PromptInputActions className="items-center justify-between pt-2">
+          <label className="flex items-center gap-2">
+            <span className="sr-only">Model</span>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={isLoading}
+              className="text-muted-foreground hover:text-foreground focus-visible:ring-ring cursor-pointer rounded-md bg-transparent py-1 pr-1 text-xs font-medium outline-none focus-visible:ring-2 disabled:opacity-60"
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <PromptInputAction tooltip="Send message">
+            <Button
+              type="button"
+              size="icon"
+              className="h-9 w-9 rounded-full"
+              disabled={!canSend}
+              onClick={handleSubmit}
+              aria-label="Send message"
+            >
+              <ArrowUp className="h-4 w-4" />
+            </Button>
+          </PromptInputAction>
+        </PromptInputActions>
+      </PromptInput>
+      <p className="text-muted-foreground mt-2 text-center text-xs">
+        Powered by Salesforce Models API
+      </p>
+    </>
+  )
 
   return (
     <>
       <Show when="signed-out">
         <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
           <div className="text-center">
-            <h1 className="text-xl font-bold">Salesforce Models API Chat</h1>
-            <p className="text-muted-foreground text-sm">
+            <Sparkles className="text-primary mx-auto mb-3 h-8 w-8" />
+            <h1 className="font-serif text-2xl font-medium">
+              Salesforce Models API Chat
+            </h1>
+            <p className="text-muted-foreground mt-1 text-sm">
               Sign in with Salesforce to chat with Salesforce-hosted LLMs.
             </p>
           </div>
@@ -288,7 +352,9 @@ export default function ChatPage() {
         ) : !sfUsername ? (
           <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
             <div className="max-w-md space-y-3 text-center">
-              <h1 className="text-xl font-bold">Salesforce account required</h1>
+              <h1 className="font-serif text-2xl font-medium">
+                Salesforce account required
+              </h1>
               <p className="text-muted-foreground text-sm">
                 You&apos;re signed in, but this app requires a linked Salesforce
                 account and we couldn&apos;t find one for your login. Please sign
@@ -313,7 +379,7 @@ export default function ChatPage() {
 
             <div
               className={cn(
-                "bg-background fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 md:static md:z-auto md:w-64 md:shrink-0 md:translate-x-0",
+                "bg-sidebar border-border fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 md:static md:z-auto md:w-64 md:shrink-0 md:translate-x-0 md:border-r",
                 isSidebarOpen ? "translate-x-0" : "-translate-x-full"
               )}
             >
@@ -329,7 +395,7 @@ export default function ChatPage() {
             </div>
 
             <div className="mx-auto flex h-dvh w-full max-w-3xl flex-1 flex-col">
-              <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
+              <header className="flex items-center justify-between gap-4 px-4 py-3">
                 <div className="flex items-center gap-2">
                   <Button
                     type="button"
@@ -341,146 +407,80 @@ export default function ChatPage() {
                   >
                     <PanelLeft className="h-4 w-4" />
                   </Button>
-                  <div>
-                    <h1 className="text-sm font-semibold">
-                      Salesforce Models API Chat
-                    </h1>
-                    {activeModel?.description && (
-                      <p className="text-muted-foreground text-xs">
-                        {activeModel.description}
-                      </p>
-                    )}
-                  </div>
+                  <h1 className="font-serif text-base font-medium">
+                    Salesforce Models API Chat
+                  </h1>
                 </div>
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-2 text-sm">
-                    <span className="text-muted-foreground hidden sm:inline">
-                      Model
-                    </span>
-                    <select
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      disabled={isLoading}
-                      className="border-input bg-background focus-visible:ring-ring rounded-md border px-2 py-1.5 text-sm shadow-xs focus-visible:ring-2 focus-visible:outline-none disabled:opacity-60"
-                    >
-                      {MODELS.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <UserButton />
-                </div>
+                <UserButton />
               </header>
 
-              <div className="relative flex-1 overflow-hidden">
-                <ChatContainerRoot className="h-full">
-                  <ChatContainerContent className="space-y-6 px-4 py-6">
-                    {isResuming ? (
-                      <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
-                        <Loader variant="typing" />
-                      </div>
-                    ) : (
-                      messages.length === 0 &&
-                      !isLoading && (
-                        <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
-                          <p className="text-base font-medium">
-                            Start a conversation
-                          </p>
-                          <p className="text-sm">
-                            Messages are sent to the Salesforce Models API.
-                          </p>
-                        </div>
-                      )
-                    )}
-
-                    {messages.map((message, index) =>
-                      message.role === "user" ? (
-                        <Message key={index} className="justify-end">
-                          <MessageContent className="bg-primary text-primary-foreground max-w-[80%]">
-                            {message.content}
-                          </MessageContent>
-                        </Message>
-                      ) : (
-                        <Message key={index} className="justify-start">
-                          <MessageAvatar
-                            src=""
-                            alt="Assistant"
-                            fallback="AI"
-                            className="bg-muted"
-                          />
-                          <div className="min-w-0 flex-1">
-                            <MessageContent
-                              markdown
-                              className="max-w-none bg-transparent p-0"
-                            >
-                              {message.content}
-                            </MessageContent>
-                            {modelLabel(message.model) && (
-                              <p className="text-muted-foreground mt-1 text-xs">
-                                {modelLabel(message.model)}
-                              </p>
-                            )}
+              {showGreeting ? (
+                <div className="flex flex-1 flex-col items-center justify-center px-4 pb-20">
+                  <div className="w-full max-w-2xl">
+                    <div className="mb-8 flex flex-col items-center gap-4 text-center">
+                      <Sparkles className="text-primary h-8 w-8" />
+                      <h2 className="font-serif text-3xl font-normal tracking-tight sm:text-4xl">
+                        {greeting}
+                      </h2>
+                    </div>
+                    {composer}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="relative flex-1 overflow-hidden">
+                    <ChatContainerRoot className="h-full">
+                      <ChatContainerContent className="space-y-8 px-4 py-6">
+                        {isResuming && (
+                          <div className="text-muted-foreground flex flex-col items-center justify-center pt-24 text-center">
+                            <Loader variant="typing" />
                           </div>
-                        </Message>
-                      )
-                    )}
+                        )}
 
-                    {isLoading && (
-                      <Message className="justify-start">
-                        <MessageAvatar
-                          src=""
-                          alt="Assistant"
-                          fallback="AI"
-                          className="bg-muted"
-                        />
-                        <div className="flex items-center pt-1.5">
-                          <Loader variant="typing" />
-                        </div>
-                      </Message>
-                    )}
-                  </ChatContainerContent>
+                        {messages.map((message, index) =>
+                          message.role === "user" ? (
+                            <Message key={index} className="justify-end">
+                              <MessageContent className="bg-secondary text-secondary-foreground max-w-[80%] rounded-2xl px-4 py-2.5">
+                                {message.content}
+                              </MessageContent>
+                            </Message>
+                          ) : (
+                            <Message key={index} className="justify-start">
+                              <div className="min-w-0 flex-1">
+                                <MessageContent
+                                  markdown
+                                  className="max-w-none bg-transparent p-0"
+                                >
+                                  {message.content}
+                                </MessageContent>
+                                {modelLabel(message.model) && (
+                                  <p className="text-muted-foreground mt-2 text-xs">
+                                    {modelLabel(message.model)}
+                                  </p>
+                                )}
+                              </div>
+                            </Message>
+                          )
+                        )}
 
-                  <div className="absolute right-4 bottom-4">
-                    <ScrollButton />
+                        {isLoading && (
+                          <Message className="justify-start">
+                            <div className="flex items-center pt-1.5">
+                              <Loader variant="typing" />
+                            </div>
+                          </Message>
+                        )}
+                      </ChatContainerContent>
+
+                      <div className="absolute right-4 bottom-4">
+                        <ScrollButton />
+                      </div>
+                    </ChatContainerRoot>
                   </div>
-                </ChatContainerRoot>
-              </div>
 
-              <div className="px-4 pb-4">
-                {error && (
-                  <div className="border-destructive/40 bg-destructive/10 text-destructive mb-2 rounded-md border px-3 py-2 text-sm">
-                    {error}
-                  </div>
-                )}
-                <PromptInput
-                  value={input}
-                  onValueChange={setInput}
-                  isLoading={isLoading}
-                  onSubmit={handleSubmit}
-                  className="w-full"
-                >
-                  <PromptInputTextarea placeholder="Send a message..." />
-                  <PromptInputActions className="justify-end pt-2">
-                    <PromptInputAction tooltip="Send message">
-                      <Button
-                        type="button"
-                        size="icon"
-                        className="h-9 w-9 rounded-full"
-                        disabled={!canSend}
-                        onClick={handleSubmit}
-                        aria-label="Send message"
-                      >
-                        <ArrowUp className="h-4 w-4" />
-                      </Button>
-                    </PromptInputAction>
-                  </PromptInputActions>
-                </PromptInput>
-                <p className="text-muted-foreground mt-2 text-center text-xs">
-                  Powered by Salesforce Models API · prompt-kit
-                </p>
-              </div>
+                  <div className="px-4 pb-4">{composer}</div>
+                </>
+              )}
             </div>
           </div>
         )}
