@@ -292,7 +292,14 @@ export default function ChatPage() {
       >
         <PromptInputTextarea placeholder="How can I help you today?" />
         <PromptInputActions className="items-center justify-between pt-2">
-          <label className="flex items-center gap-2">
+          {/* Contain pointer/click here so they don't bubble to PromptInput's
+              root onClick, which refocuses the textarea and would snap the
+              native <select> dropdown shut the instant it opens. */}
+          <label
+            className="flex items-center gap-2"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
             <span className="sr-only">Model</span>
             <select
               value={model}
