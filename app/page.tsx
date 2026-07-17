@@ -371,7 +371,7 @@ export default function ChatPage() {
           <div className="text-center">
             <Sparkles className="text-primary mx-auto mb-3 h-8 w-8" />
             <h1 className="font-serif text-2xl font-medium">
-              Salesforce Models API Chat
+              MIMIT Health LLM Client
             </h1>
             <p className="text-muted-foreground mt-1 text-sm">
               Sign in with Salesforce to chat with Salesforce-hosted LLMs.
@@ -446,7 +446,7 @@ export default function ChatPage() {
                     <PanelLeft className="h-4 w-4" />
                   </Button>
                   <h1 className="font-serif text-base font-medium">
-                    Salesforce Models API Chat
+                    MIMIT Health LLM Client
                   </h1>
                 </div>
                 <UserButton />

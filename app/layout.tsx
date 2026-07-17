@@ -22,7 +22,7 @@ const sourceSerif = Source_Serif_4({
 });
 
 export const metadata: Metadata = {
-  title: "Salesforce Models API Chat",
+  title: "MIMIT Health LLM Client",
   description: "Chat with Salesforce-hosted LLMs via the Models API",
 };
 

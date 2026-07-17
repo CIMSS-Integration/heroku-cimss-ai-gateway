@@ -1,4 +1,4 @@
-# Salesforce Models API Chat
+# MIMIT Health LLM Client
 
 A chat interface for Salesforce-hosted LLMs (the [Models API](https://developer.salesforce.com/docs/einstein/genai/guide/models-api.html)), built with [Next.js](https://nextjs.org) and [prompt-kit](https://prompt-kit.com) UI components.
 
