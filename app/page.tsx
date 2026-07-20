@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import Image from "next/image"
 import { ArrowUp, PanelLeft } from "lucide-react"
 import { Sparkles } from "lucide-react"
 import { Show, SignIn, UserButton } from "@clerk/nextjs"
@@ -27,6 +28,29 @@ import type {
   ChatMessageWithModel,
   ChatSessionSummary,
 } from "@/lib/types"
+
+/** The MIMIT Healthcare brand mark — the sage-teal leaf tile from the logo.
+ *  Size it via `className` on the wrapper; the image is scaled slightly to
+ *  crop the logo's white margin so only the teal tile shows. */
+function BrandMark({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "relative inline-block shrink-0 overflow-hidden rounded-md",
+        className
+      )}
+    >
+      <Image
+        src="/MIMIT_Logo.png"
+        alt="MIMIT Healthcare logo"
+        fill
+        sizes="48px"
+        className="scale-[1.12] object-cover"
+        priority
+      />
+    </span>
+  )
+}
 
 function modelLabel(id: string | null): string | null {
   if (!id) return null
@@ -369,9 +393,12 @@ export default function ChatPage() {
       <Show when="signed-out">
         <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
           <div className="text-center">
-            <Sparkles className="text-primary mx-auto mb-3 h-8 w-8" />
-            <h1 className="font-serif text-2xl font-medium">
-              MIMIT Health LLM Client
+            <BrandMark className="mx-auto mb-3 h-12 w-12" />
+            <h1 className="text-2xl tracking-tight">
+              <span className="text-brand-navy font-brand font-semibold">
+                MIMIT
+              </span>{" "}
+              <span className="font-serif font-medium">Health LLM Client</span>
             </h1>
             <p className="text-muted-foreground mt-1 text-sm">
               Sign in with Salesforce to chat with Salesforce-hosted LLMs.
@@ -445,8 +472,14 @@ export default function ChatPage() {
                   >
                     <PanelLeft className="h-4 w-4" />
                   </Button>
-                  <h1 className="font-serif text-base font-medium">
-                    MIMIT Health LLM Client
+                  <BrandMark className="h-8 w-8" />
+                  <h1 className="text-xl tracking-tight sm:text-2xl">
+                    <span className="text-brand-navy font-brand font-semibold">
+                      MIMIT
+                    </span>{" "}
+                    <span className="font-serif font-medium">
+                      Health LLM Client
+                    </span>
                   </h1>
                 </div>
                 <UserButton />

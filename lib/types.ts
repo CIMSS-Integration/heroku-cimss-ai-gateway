@@ -14,6 +14,14 @@ export type ChatMessage = {
  */
 export type ChatMessageWithModel = ChatMessage & {
   model: string | null
+  /**
+   * Per-turn metadata stored in `ai.chat_message.metadata` (jsonb). For an
+   * assistant turn this holds the Salesforce token accounting, e.g.
+   * `{ usage: { inputTokenCount, outputTokenCount, totalTokenCount,
+   * cacheWriteInputTokenCount, cacheReadInputTokenCount }, model }`. Absent for
+   * user turns and for turns stored before usage tracking existed.
+   */
+  metadata?: Record<string, unknown> | null
 }
 
 /** Sidebar-facing summary of a saved chat — no message bodies. */

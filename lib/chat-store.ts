@@ -25,13 +25,14 @@ async function getMessages(
   sessionId: string
 ): Promise<ChatMessageWithModel[]> {
   const result = await pool.query(
-    `select role, content, model from ai.chat_message where session_id = $1 order by seq asc`,
+    `select role, content, model, metadata from ai.chat_message where session_id = $1 order by seq asc`,
     [sessionId]
   )
   return result.rows.map((row) => ({
     role: row.role as ChatRole,
     content: row.content as string,
     model: (row.model as string | null) ?? null,
+    metadata: (row.metadata as Record<string, unknown> | null) ?? null,
   }))
 }
 
@@ -212,9 +213,16 @@ export async function appendConversation(
     for (const message of toInsert) {
       seq += 1
       await client.query(
-        `insert into ai.chat_message (session_id, role, content, seq, model)
-         values ($1, $2, $3, $4, $5)`,
-        [sessionId, message.role, message.content, seq, message.model]
+        `insert into ai.chat_message (session_id, role, content, seq, model, metadata)
+         values ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [
+          sessionId,
+          message.role,
+          message.content,
+          seq,
+          message.model,
+          JSON.stringify(message.metadata ?? {}),
+        ]
       )
     }
 

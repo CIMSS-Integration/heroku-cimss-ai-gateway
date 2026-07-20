@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { chatGenerate } from "@/lib/salesforce"
+import { chatGenerate, type ChatUsage } from "@/lib/salesforce"
 import { createSession, appendConversation } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
 import { MODELS } from "@/config/models"
@@ -93,8 +93,22 @@ export async function POST(request: Request) {
   const conversation = typedMessages.filter((m) => m.role !== "system")
 
   let content: string
+  let usage: ChatUsage | null = null
   try {
-    ;({ content } = await chatGenerate(model, typedMessages))
+    const result = await chatGenerate(model, typedMessages)
+    content = result.content
+    usage = result.usage
+    // Log the Salesforce token accounting for each generation request.
+    console.log("[/api/chat] generation usage", {
+      sessionId: activeSessionIdInput ?? null,
+      requestedModel: model,
+      inputTokenCount: usage?.inputTokenCount,
+      totalTokenCount: usage?.totalTokenCount,
+      outputTokenCount: usage?.outputTokenCount,
+      cacheWriteInputTokenCount: usage?.cacheWriteInputTokenCount,
+      cacheReadInputTokenCount: usage?.cacheReadInputTokenCount,
+      model: usage?.model,
+    })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
@@ -102,11 +116,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 502 })
   }
 
+  // Token accounting to persist on the assistant turn (mirrors the shape of the
+  // Salesforce response's `parameters`). Null when the API returned no usage.
+  const assistantMetadata: Record<string, unknown> | null = usage
+    ? {
+        usage: {
+          inputTokenCount: usage.inputTokenCount,
+          outputTokenCount: usage.outputTokenCount,
+          totalTokenCount: usage.totalTokenCount,
+          cacheWriteInputTokenCount: usage.cacheWriteInputTokenCount,
+          cacheReadInputTokenCount: usage.cacheReadInputTokenCount,
+        },
+        model: usage.model,
+      }
+    : null
+
   // The whole conversation plus the just-generated reply. Only the reply's
-  // model is known here; earlier turns carry null (unknown/backfill).
+  // model is known here; earlier turns carry null (unknown/backfill). The
+  // reply also carries its token usage in metadata.
   const fullConversation: ChatMessageWithModel[] = [
     ...conversation.map((m) => ({ ...m, model: null })),
-    { role: "assistant" as ChatRole, content, model },
+    { role: "assistant" as ChatRole, content, model, metadata: assistantMetadata },
   ]
 
   // Persistence is on the critical path — we don't return a reply we failed to

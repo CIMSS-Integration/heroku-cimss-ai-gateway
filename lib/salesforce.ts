@@ -98,8 +98,21 @@ async function getToken(forceRefresh = false): Promise<TokenCache> {
   return fetchToken()
 }
 
+/** Token accounting returned by chat-generations, under
+ *  generationDetails.parameters. All counts are optional — older/other models
+ *  may omit some fields. */
+export type ChatUsage = {
+  inputTokenCount?: number
+  outputTokenCount?: number
+  totalTokenCount?: number
+  cacheWriteInputTokenCount?: number
+  cacheReadInputTokenCount?: number
+  model?: string
+}
+
 export type ChatGenerateResult = {
   content: string
+  usage: ChatUsage | null
   raw: unknown
 }
 
@@ -154,7 +167,34 @@ export async function chatGenerate(
     throw new Error(`Salesforce chat response was not JSON: ${text}`)
   }
 
-  return { content: extractContent(data), raw: data }
+  return { content: extractContent(data), usage: extractUsage(data), raw: data }
+}
+
+/**
+ * Pull the token-usage accounting out of the Models API response. The
+ * chat-generations response nests it under generationDetails.parameters
+ * ({ usage: {...}, model }); we defensively check a couple of known shapes.
+ */
+function extractUsage(data: unknown): ChatUsage | null {
+  const d = data as {
+    generationDetails?: { parameters?: Record<string, unknown> }
+    parameters?: Record<string, unknown>
+  }
+  const params = d?.generationDetails?.parameters ?? d?.parameters
+  if (!params) return null
+
+  const usage = (params.usage ?? {}) as Record<string, unknown>
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" ? v : undefined
+
+  return {
+    inputTokenCount: num(usage.inputTokenCount),
+    outputTokenCount: num(usage.outputTokenCount),
+    totalTokenCount: num(usage.totalTokenCount),
+    cacheWriteInputTokenCount: num(usage.cacheWriteInputTokenCount),
+    cacheReadInputTokenCount: num(usage.cacheReadInputTokenCount),
+    model: typeof params.model === "string" ? params.model : undefined,
+  }
 }
 
 /**
