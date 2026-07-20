@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { archiveSession, getSession, renameSession } from "@/lib/chat-store"
+import {
+  archiveSession,
+  getSession,
+  moveSessionToProject,
+  renameSession,
+} from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
 
 // Same rationale as app/api/chat/route.ts — pg needs the Node runtime.
@@ -33,7 +38,11 @@ export async function GET(_request: Request, { params }: RouteParams) {
   }
 }
 
-/** Renames a chat (updates its sidebar title). Body: `{ title: string }`. */
+/**
+ * Updates a chat. Two independent operations, either or both per request:
+ *   - rename: `{ title: string }`
+ *   - move to/from a project: `{ projectId: string | null }` (null = unfile)
+ */
 export async function PATCH(request: Request, { params }: RouteParams) {
   const { userId } = await auth()
   if (!userId) {
@@ -49,23 +58,67 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { title } = (payload ?? {}) as { title?: unknown }
-  if (typeof title !== "string" || title.trim().length === 0) {
+  const body = (payload ?? {}) as { title?: unknown; projectId?: unknown }
+  const hasTitle = body.title !== undefined
+  const hasProject = body.projectId !== undefined
+
+  if (!hasTitle && !hasProject) {
+    return NextResponse.json(
+      { error: "Provide `title` and/or `projectId` to update." },
+      { status: 400 }
+    )
+  }
+  if (
+    hasTitle &&
+    (typeof body.title !== "string" || body.title.trim().length === 0)
+  ) {
     return NextResponse.json(
       { error: "`title` must be a non-empty string." },
+      { status: 400 }
+    )
+  }
+  if (
+    hasProject &&
+    body.projectId !== null &&
+    typeof body.projectId !== "string"
+  ) {
+    return NextResponse.json(
+      { error: "`projectId` must be a string or null." },
       { status: 400 }
     )
   }
 
   try {
     const sfUsername = await getSalesforceUsername()
-    const newTitle = sfUsername
-      ? await renameSession(id, sfUsername, title)
-      : null
-    if (!newTitle) {
+    if (!sfUsername) {
       return NextResponse.json({ error: "Chat not found" }, { status: 404 })
     }
-    return NextResponse.json({ ok: true, title: newTitle })
+
+    const response: { ok: true; title?: string } = { ok: true }
+
+    if (hasProject) {
+      const moved = await moveSessionToProject(
+        id,
+        sfUsername,
+        body.projectId as string | null
+      )
+      if (!moved) {
+        return NextResponse.json(
+          { error: "Chat or target project not found" },
+          { status: 404 }
+        )
+      }
+    }
+
+    if (hasTitle) {
+      const newTitle = await renameSession(id, sfUsername, body.title as string)
+      if (!newTitle) {
+        return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+      }
+      response.title = newTitle
+    }
+
+    return NextResponse.json(response)
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"

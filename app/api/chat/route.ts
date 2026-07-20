@@ -1,9 +1,18 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { chatGenerate, type ChatUsage } from "@/lib/salesforce"
-import { createSession, appendConversation } from "@/lib/chat-store"
+import {
+  chatGenerateWithTimeout,
+  GenerationTimeoutError,
+  type ChatUsage,
+} from "@/lib/salesforce"
+import {
+  createSession,
+  appendConversation,
+  getProjectInstructions,
+  getSessionContext,
+} from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
-import { MODELS } from "@/config/models"
+import { MODELS, GENERATION_TIMEOUT_MS } from "@/config/models"
 import type { ChatMessage, ChatMessageWithModel, ChatRole } from "@/lib/types"
 
 // The Salesforce client uses Node APIs / env vars — force the Node runtime.
@@ -22,6 +31,72 @@ function isValidMessage(m: unknown): m is ChatMessage {
   )
 }
 
+/**
+ * Builds the messages actually sent to the model. Folds the base system prompt,
+ * any project instructions, and (when the chat has been compacted) a summary of
+ * the earlier conversation into a single leading system message — the Models API
+ * expects at most one system turn. When a summary is present the leading
+ * `summarizedCount` conversation messages it replaces are dropped, keeping only
+ * the recent turns verbatim; at least the latest message is always kept.
+ */
+function buildModelMessages(
+  messages: ChatMessage[],
+  opts: {
+    projectInstructions: string | null
+    summary: string | null
+    summarizedCount: number
+  }
+): ChatMessage[] {
+  const conversation = messages.filter((m) => m.role !== "system")
+  const baseSystem = messages.find((m) => m.role === "system")?.content ?? ""
+
+  const parts: string[] = []
+  if (baseSystem.trim()) parts.push(baseSystem.trim())
+  if (opts.projectInstructions?.trim()) {
+    parts.push(`Project instructions:\n${opts.projectInstructions.trim()}`)
+  }
+  if (opts.summary?.trim()) {
+    parts.push(
+      "Summary of earlier conversation (earlier messages were condensed to " +
+        `save space; treat this as prior context):\n${opts.summary.trim()}`
+    )
+  }
+  const systemContent = parts.join("\n\n")
+
+  let tail = conversation
+  if (opts.summary?.trim()) {
+    const start = Math.max(
+      0,
+      Math.min(opts.summarizedCount, conversation.length - 1)
+    )
+    tail = conversation.slice(start)
+  }
+
+  // The Models API (Bedrock/Anthropic) expects the first non-system turn to be
+  // from the user. Our slice normally lands on a user turn (history is
+  // even-length and alternating, and KEEP_RECENT_MESSAGES is even), but drop any
+  // leading assistant turn defensively so the payload never starts mid-exchange.
+  while (tail.length > 1 && tail[0].role === "assistant") {
+    tail = tail.slice(1)
+  }
+
+  return systemContent
+    ? [{ role: "system", content: systemContent }, ...tail]
+    : tail
+}
+
+/**
+ * Heuristic: does a Salesforce error look like a context/token-limit rejection?
+ * The Models API doesn't return a stable machine code for this, so we match the
+ * usual phrasings. Used to surface the "summarize / new chat" prompt instead of
+ * a raw error.
+ */
+function isContextLimitError(message: string): boolean {
+  return /context (length|window)|maximum context|too many tokens|token limit|exceeds? the maximum|input is too long|prompt is too long|reduce the (length|number of tokens)|max(imum)?[ _-]?tokens/i.test(
+    message
+  )
+}
+
 export async function POST(request: Request) {
   // Require an authenticated Clerk session before hitting the Models API.
   const { userId } = await auth()
@@ -36,10 +111,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { model, messages, sessionId } = (payload ?? {}) as {
+  const { model, messages, sessionId, projectId } = (payload ?? {}) as {
     model?: unknown
     messages?: unknown
     sessionId?: unknown
+    projectId?: unknown
   }
 
   if (typeof model !== "string" || !MODELS.some((m) => m.id === model)) {
@@ -73,6 +149,16 @@ export async function POST(request: Request) {
   }
   const activeSessionIdInput = (sessionId ?? undefined) as string | undefined
 
+  // Only used when starting a NEW chat inside a project. Existing chats keep
+  // whatever project they were already filed under (moves go via PATCH).
+  if (projectId != null && typeof projectId !== "string") {
+    return NextResponse.json(
+      { error: "`projectId` must be a string if provided." },
+      { status: 400 }
+    )
+  }
+  const newChatProjectId = (projectId ?? null) as string | null
+
   // This app requires a linked Salesforce account: every chat is logged under a
   // Salesforce username, so we refuse to generate anything we couldn't attribute
   // and store. No SF account → 403, before the model is ever called (no gap).
@@ -92,10 +178,45 @@ export async function POST(request: Request) {
   // (system turns are re-derived per request, never stored).
   const conversation = typedMessages.filter((m) => m.role !== "system")
 
+  // Assemble the context that shapes the model payload: project instructions
+  // (project-wide guidance) and, for an already-compacted chat, the summary that
+  // replaces its earlier turns. For an existing chat both come from the stored
+  // session; for a brand-new chat only project instructions apply. Never fatal —
+  // on any lookup error we proceed with what we have.
+  let projectInstructions: string | null = null
+  let summary: string | null = null
+  let summarizedCount = 0
+  try {
+    if (activeSessionIdInput) {
+      const ctx = await getSessionContext(activeSessionIdInput, sfUsername)
+      if (ctx) {
+        projectInstructions = ctx.projectInstructions
+        summary = ctx.summary
+        summarizedCount = ctx.summarizedCount
+      }
+    } else if (newChatProjectId) {
+      projectInstructions = await getProjectInstructions(
+        newChatProjectId,
+        sfUsername
+      )
+    }
+  } catch (err) {
+    console.error("[/api/chat] session context lookup failed", err)
+  }
+  const messagesForModel = buildModelMessages(typedMessages, {
+    projectInstructions,
+    summary,
+    summarizedCount,
+  })
+
   let content: string
   let usage: ChatUsage | null = null
   try {
-    const result = await chatGenerate(model, typedMessages)
+    const result = await chatGenerateWithTimeout(
+      model,
+      messagesForModel,
+      GENERATION_TIMEOUT_MS
+    )
     content = result.content
     usage = result.usage
     // Log the Salesforce token accounting for each generation request.
@@ -110,9 +231,35 @@ export async function POST(request: Request) {
       model: usage?.model,
     })
   } catch (error) {
+    // Timed out before Heroku's router limit — return a clean 504 (not the
+    // platform's HTML H12) and, because this is before the persistence step,
+    // the half-finished turn is never saved.
+    if (error instanceof GenerationTimeoutError) {
+      console.error("[/api/chat] model call timed out", error.timeoutMs)
+      return NextResponse.json(
+        {
+          error:
+            "The model took too long to respond and the request timed out. Try a shorter prompt or a faster model.",
+          code: "timeout",
+        },
+        { status: 504 }
+      )
+    }
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
     console.error("[/api/chat] model call failed", message)
+    // Surface a context-limit rejection with a machine code so the client can
+    // offer to summarize instead of showing a raw error.
+    if (isContextLimitError(message)) {
+      return NextResponse.json(
+        {
+          error:
+            "This chat has reached the model's context limit. Summarize it to continue, or start a new chat.",
+          code: "context_limit",
+        },
+        { status: 413 }
+      )
+    }
     return NextResponse.json({ error: message }, { status: 502 })
   }
 
@@ -148,7 +295,8 @@ export async function POST(request: Request) {
       activeSessionId = await createSession(
         sfUsername,
         model,
-        conversation[0]?.content ?? content
+        conversation[0]?.content ?? content,
+        newChatProjectId
       )
     }
     await appendConversation(activeSessionId, sfUsername, fullConversation, model)
@@ -163,5 +311,17 @@ export async function POST(request: Request) {
     )
   }
 
-  return NextResponse.json({ content, sessionId: activeSessionId })
+  // Return the turn's input-token count so the client can measure how full the
+  // context window is and offer to summarize as it approaches the limit.
+  return NextResponse.json({
+    content,
+    sessionId: activeSessionId,
+    usage: usage
+      ? {
+          inputTokenCount: usage.inputTokenCount,
+          totalTokenCount: usage.totalTokenCount,
+          outputTokenCount: usage.outputTokenCount,
+        }
+      : null,
+  })
 }

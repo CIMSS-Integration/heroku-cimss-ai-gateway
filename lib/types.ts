@@ -30,4 +30,22 @@ export type ChatSessionSummary = {
   model: string
   title: string | null
   updatedAt: string
+  /** The project this chat is filed under, or null when unfiled. */
+  projectId: string | null
+}
+
+/** Sidebar-facing summary of a project (no chats). */
+export type ChatProjectSummary = {
+  id: string
+  name: string
+  updatedAt: string
+  /** Count of non-archived chats filed under the project. */
+  chatCount: number
+}
+
+/** A project plus the chats filed under it. */
+export type ChatProjectWithChats = ChatProjectSummary & {
+  /** Project-wide instructions prepended to the system prompt for its chats. */
+  instructions: string | null
+  chats: ChatSessionSummary[]
 }

@@ -119,10 +119,15 @@ export type ChatGenerateResult = {
 /**
  * Send a full conversation (system/user/assistant turns) to the Models API
  * chat-generations endpoint and return the assistant's reply text.
+ *
+ * Pass `opts.signal` to bound the call (e.g. an AbortController that fires
+ * before Heroku's router timeout). When it aborts, the underlying fetch throws
+ * an AbortError, which callers can detect to return a clean timeout response.
  */
 export async function chatGenerate(
   model: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ChatGenerateResult> {
   const apiHost = trimSlash(process.env.SF_API_HOST || DEFAULT_API_HOST)
 
@@ -141,6 +146,7 @@ export async function chatGenerate(
         },
         body: JSON.stringify({ messages }),
         cache: "no-store",
+        signal: opts.signal,
       }
     )
 
@@ -168,6 +174,44 @@ export async function chatGenerate(
   }
 
   return { content: extractContent(data), usage: extractUsage(data), raw: data }
+}
+
+/** Thrown by chatGenerateWithTimeout when a call exceeds its time budget. */
+export class GenerationTimeoutError extends Error {
+  readonly timeoutMs: number
+  constructor(timeoutMs: number) {
+    super(`Model call exceeded ${timeoutMs}ms`)
+    this.name = "GenerationTimeoutError"
+    this.timeoutMs = timeoutMs
+  }
+}
+
+/**
+ * chatGenerate bounded by a timeout. Aborts the underlying request after
+ * `timeoutMs` and throws GenerationTimeoutError — distinct from a real API
+ * failure — so callers can return a clean 504 before Heroku's H12 fires.
+ */
+export async function chatGenerateWithTimeout(
+  model: string,
+  messages: ChatMessage[],
+  timeoutMs: number
+): Promise<ChatGenerateResult> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  try {
+    return await chatGenerate(model, messages, { signal: controller.signal })
+  } catch (err) {
+    if (timedOut || (err instanceof Error && err.name === "AbortError")) {
+      throw new GenerationTimeoutError(timeoutMs)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**

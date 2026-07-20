@@ -19,6 +19,13 @@ export type ModelConfig = {
   label: string
   /** Optional one-line description shown under the picker. */
   description?: string
+  /**
+   * Approximate input context window in tokens. Used to decide when a chat is
+   * getting close to the limit (see CONTEXT_WARN_RATIO). These are the models'
+   * advertised windows; if the Salesforce platform caps lower, the hard-error
+   * fallback still catches it.
+   */
+  contextWindow: number
 }
 
 export const MODELS: ModelConfig[] = [
@@ -26,26 +33,60 @@ export const MODELS: ModelConfig[] = [
     id: "sfdc_ai__DefaultBedrockAnthropicClaude46Sonnet",
     label: "Claude Sonnet 4.6 (Bedrock)",
     description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
+    contextWindow: 200_000,
   },
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
     label: "Claude Opus 4.8 (Bedrock)",
     description: "Anthropic Claude Opus, served via Amazon Bedrock",
+    contextWindow: 200_000,
   },
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude45Haiku",
     label: "Claude Haiku 4.5 (Bedrock)",
     description: "Fast, low-cost Anthropic Claude Haiku, via Amazon Bedrock",
+    contextWindow: 200_000,
   },
   {
     id: "sfdc_ai__DefaultGPT55",
     label: "GPT-5.5 (OpenAI)",
     description: "OpenAI GPT-5.5",
+    contextWindow: 128_000,
   },
 ]
 
+/** Fallback window for a model that somehow lacks one configured. */
+export const DEFAULT_CONTEXT_WINDOW = 128_000
+
+/** Look up a model's context window (tokens), falling back to the default. */
+export function contextWindowFor(modelId: string | null): number {
+  const model = MODELS.find((m) => m.id === modelId)
+  return model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+}
+
+/**
+ * Fraction of the context window at which we offer to summarize. At/above this
+ * (measured against the last turn's actual input-token count) the UI shows the
+ * "summarize & continue / start new chat" prompt.
+ */
+export const CONTEXT_WARN_RATIO = 0.85
+
+/**
+ * How many of the most recent messages stay verbatim when summarizing; the
+ * older ones are condensed into a synopsis.
+ */
+export const KEEP_RECENT_MESSAGES = 4
+
 /** The model selected by default when the app loads. */
 export const DEFAULT_MODEL = MODELS[0]?.id ?? ""
+
+/**
+ * Time budget for a single Models API generation before we abort it and return
+ * a clean 504. Kept just under Heroku's 30s router timeout (H12) so we respond
+ * ourselves rather than letting the platform kill the request with an HTML error
+ * page — leaving a small margin to actually send the timeout response.
+ */
+export const GENERATION_TIMEOUT_MS = 28_000
 
 /**
  * Optional system prompt prepended to every conversation. Set to "" to disable.

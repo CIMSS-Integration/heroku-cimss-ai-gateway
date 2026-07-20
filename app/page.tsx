@@ -20,12 +20,19 @@ import {
 import { ScrollButton } from "@/components/ui/scroll-button"
 import { Loader } from "@/components/ui/loader"
 import { Button } from "@/components/ui/button"
-import { ChatSidebar } from "@/components/chat-sidebar"
-import { MODELS, DEFAULT_MODEL, SYSTEM_PROMPT } from "@/config/models"
+import { ChatSidebar, type SidebarTab } from "@/components/chat-sidebar"
+import {
+  MODELS,
+  DEFAULT_MODEL,
+  SYSTEM_PROMPT,
+  CONTEXT_WARN_RATIO,
+  contextWindowFor,
+} from "@/config/models"
 import { cn } from "@/lib/utils"
 import type {
   ChatMessage,
   ChatMessageWithModel,
+  ChatProjectSummary,
   ChatSessionSummary,
 } from "@/lib/types"
 
@@ -94,10 +101,33 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+
+  // Projects: a container a chat can be filed under. The sidebar has a Chats
+  // tab (unfiled chats) and a Projects tab (projects → drill in to their chats).
+  const [activeTab, setActiveTab] = useState<SidebarTab>("chats")
+  const [projects, setProjects] = useState<ChatProjectSummary[]>([])
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [projectChats, setProjectChats] = useState<ChatSessionSummary[]>([])
+  const [isLoadingProjectChats, setIsLoadingProjectChats] = useState(false)
+  // When starting a NEW chat inside a project, the project it should be filed
+  // under on first send. Null for a normal (unfiled) new chat.
+  const [composerProjectId, setComposerProjectId] = useState<string | null>(null)
+
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [isResuming, setIsResuming] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Context-window management. `inputTokens` is the last reply's input-token
+  // count (from Salesforce) — how full the window is. `contextLimitHit` is set
+  // when a send is rejected outright for exceeding the limit. The summarize /
+  // new-chat prompt shows when we're near the limit or after a hard rejection.
+  const [inputTokens, setInputTokens] = useState<number | null>(null)
+  const [contextLimitHit, setContextLimitHit] = useState(false)
+  const [isSummarizing, setIsSummarizing] = useState(false)
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   // Identity gate: this app requires a linked Salesforce account so every chat
   // is logged under a Salesforce username. Until we've checked, show a loader;
@@ -106,7 +136,7 @@ export default function ChatPage() {
   const [sfUsername, setSfUsername] = useState<string | null>(null)
   const [linkedProviders, setLinkedProviders] = useState<string[]>([])
 
-  const canSend = input.trim().length > 0 && !isLoading
+  const canSend = input.trim().length > 0 && !isLoading && !isSummarizing
   const sidebarDisabled = isLoading || isResuming
 
   async function refreshSessions(): Promise<ChatSessionSummary[]> {
@@ -122,9 +152,40 @@ export default function ChatPage() {
     }
   }
 
+  async function refreshProjects(): Promise<ChatProjectSummary[]> {
+    try {
+      const res = await fetch("/api/chat/projects")
+      if (!res.ok) return []
+      const data = await readJson(res)
+      const list = (data?.projects as ChatProjectSummary[]) ?? []
+      setProjects(list)
+      return list
+    } catch {
+      return []
+    }
+  }
+
+  // Load (or reload) a project's chats into the drill-in view.
+  async function loadProjectChats(id: string) {
+    setIsLoadingProjectChats(true)
+    try {
+      const res = await fetch(`/api/chat/projects/${id}`)
+      if (!res.ok) throw new Error()
+      const data = await readJson(res)
+      const project = data?.project as { chats?: ChatSessionSummary[] } | null
+      setProjectChats(project?.chats ?? [])
+    } catch {
+      setProjectChats([])
+    } finally {
+      setIsLoadingProjectChats(false)
+    }
+  }
+
   async function loadSession(id: string) {
     setIsResuming(true)
     setError(null)
+    // The new turn will report fresh token usage; clear any prior measurement.
+    resetContextState()
     try {
       const res = await fetch(`/api/chat/sessions/${id}`)
       if (!res.ok) throw new Error()
@@ -181,8 +242,15 @@ export default function ChatPage() {
         // Blocked — no chat to load.
         setIsResuming(false)
         setIsLoadingSessions(false)
+        setIsLoadingProjects(false)
         return
       }
+
+      // Projects power the sidebar's Projects tab and the per-chat "move" menu;
+      // load them alongside the chats.
+      refreshProjects().finally(() => {
+        if (!cancelled) setIsLoadingProjects(false)
+      })
 
       const list = await refreshSessions()
       if (cancelled) return
@@ -200,29 +268,156 @@ export default function ChatPage() {
     }
   }, [])
 
+  // Clears the context-window prompt/measurement — call whenever the active
+  // conversation changes (new chat, switching chats).
+  function resetContextState() {
+    setInputTokens(null)
+    setContextLimitHit(false)
+    setBannerDismissed(false)
+    setNotice(null)
+  }
+
   function handleNewChat() {
     setSessionId(null)
     setMessages([])
     setInput("")
     setError(null)
+    setComposerProjectId(null)
+    resetContextState()
     setIsSidebarOpen(false)
   }
 
   function handleSelectSession(id: string) {
     if (id === sessionId || sidebarDisabled) return
+    // Opening an existing chat: its project is fixed server-side, so the
+    // composer's new-chat project context no longer applies.
+    setComposerProjectId(null)
     loadSession(id)
+  }
+
+  function handleTabChange(tab: SidebarTab) {
+    setActiveTab(tab)
+  }
+
+  function handleOpenProject(id: string) {
+    if (sidebarDisabled) return
+    setActiveProjectId(id)
+    loadProjectChats(id)
+  }
+
+  function handleCloseProject() {
+    setActiveProjectId(null)
+    setProjectChats([])
+  }
+
+  function handleNewChatInProject(projectId: string) {
+    setSessionId(null)
+    setMessages([])
+    setInput("")
+    setError(null)
+    // First send of this chat files it under the project.
+    setComposerProjectId(projectId)
+    resetContextState()
+    setIsSidebarOpen(false)
+  }
+
+  async function handleNewProject() {
+    const name = window.prompt("Project name")
+    if (name === null) return
+    if (!name.trim()) return
+    const instructions = window.prompt(
+      "Optional project instructions (applied to every chat in this project). Leave blank to skip."
+    )
+    try {
+      const res = await fetch("/api/chat/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          instructions: instructions ?? undefined,
+        }),
+      })
+      if (!res.ok) throw new Error()
+      await refreshProjects()
+    } catch {
+      setError("Couldn't create that project.")
+    }
+  }
+
+  async function handleRenameProject(id: string, name: string) {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const previous = projects
+    setProjects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, name: trimmed } : p))
+    )
+    try {
+      const res = await fetch(`/api/chat/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      })
+      if (!res.ok) throw new Error()
+      const data = await readJson(res)
+      const stored = (data?.name as string) ?? trimmed
+      setProjects((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, name: stored } : p))
+      )
+    } catch {
+      setProjects(previous)
+      setError("Couldn't rename that project.")
+    }
+  }
+
+  async function handleDeleteProject(id: string) {
+    if (
+      !window.confirm(
+        "Delete this project? Its chats are kept and moved back to Chats."
+      )
+    )
+      return
+    try {
+      const res = await fetch(`/api/chat/projects/${id}`, { method: "DELETE" })
+      if (!res.ok) throw new Error()
+      setProjects((prev) => prev.filter((p) => p.id !== id))
+      if (activeProjectId === id) handleCloseProject()
+      // Orphaned chats are now unfiled — refresh the Chats list.
+      refreshSessions()
+    } catch {
+      setError("Couldn't delete that project.")
+    }
+  }
+
+  async function handleMoveToProject(id: string, projectId: string | null) {
+    try {
+      const res = await fetch(`/api/chat/sessions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      })
+      if (!res.ok) throw new Error()
+      // Both lists and the project counts can change; refresh what's visible.
+      refreshSessions()
+      refreshProjects()
+      if (activeProjectId) loadProjectChats(activeProjectId)
+    } catch {
+      setError("Couldn't move that chat.")
+    }
   }
 
   async function handleRenameSession(id: string, title: string) {
     const trimmed = title.trim()
     if (!trimmed) return
 
-    // Optimistically retitle in the sidebar, remembering the prior list so we
-    // can roll back if the write fails.
-    const previous = sessions
-    setSessions((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s))
-    )
+    // Optimistically retitle in whichever list holds it (a chat lives in one:
+    // the unfiled list or the open project's list), remembering the prior state
+    // so we can roll back if the write fails.
+    const previousSessions = sessions
+    const previousProjectChats = projectChats
+    const retitle = (s: ChatSessionSummary) =>
+      s.id === id ? { ...s, title: trimmed } : s
+    setSessions((prev) => prev.map(retitle))
+    setProjectChats((prev) => prev.map(retitle))
 
     try {
       const res = await fetch(`/api/chat/sessions/${id}`, {
@@ -234,11 +429,13 @@ export default function ChatPage() {
       const data = await readJson(res)
       // Reflect the authoritative stored title (server normalizes/truncates).
       const stored = (data?.title as string) ?? trimmed
-      setSessions((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, title: stored } : s))
-      )
+      const store = (s: ChatSessionSummary) =>
+        s.id === id ? { ...s, title: stored } : s
+      setSessions((prev) => prev.map(store))
+      setProjectChats((prev) => prev.map(store))
     } catch {
-      setSessions(previous)
+      setSessions(previousSessions)
+      setProjectChats(previousProjectChats)
       setError("Couldn't rename that chat.")
     }
   }
@@ -252,6 +449,9 @@ export default function ChatPage() {
       })
       if (!res.ok) throw new Error()
       setSessions((prev) => prev.filter((s) => s.id !== id))
+      setProjectChats((prev) => prev.filter((s) => s.id !== id))
+      // A project's chat count may have changed.
+      refreshProjects()
       if (id === sessionId) {
         handleNewChat()
       }
@@ -262,9 +462,14 @@ export default function ChatPage() {
 
   async function handleSubmit() {
     const text = input.trim()
-    if (!text || isLoading) return
+    if (!text || isLoading || isSummarizing) return
 
     setError(null)
+    setNotice(null)
+    // Re-evaluate the context prompt for this turn: clear a prior hard-limit
+    // flag and any earlier dismissal so a fresh measurement can re-show it.
+    setContextLimitHit(false)
+    setBannerDismissed(false)
     // Capture the model at send time — the picker may change before the
     // reply lands, and this turn was generated by the model chosen now.
     const modelUsed = model
@@ -288,6 +493,10 @@ export default function ChatPage() {
       ? [{ role: "system", content: SYSTEM_PROMPT }, ...wireHistory]
       : wireHistory
 
+    // A new chat started inside a project is filed there on this first send.
+    const isNewChat = !sessionId
+    const filedUnderProject = isNewChat ? composerProjectId : null
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -296,10 +505,19 @@ export default function ChatPage() {
           model: modelUsed,
           messages: requestMessages,
           sessionId,
+          projectId: filedUnderProject,
         }),
       })
       const data = await readJson(res)
       if (!res.ok || !data) {
+        // A context-limit rejection isn't a generic error: keep the user's
+        // message and surface the summarize / new-chat prompt instead.
+        if (data?.code === "context_limit") {
+          setContextLimitHit(true)
+          setMessages((prev) => prev.slice(0, -1))
+          setInput(text)
+          return
+        }
         throw new Error(errorFor(res, data, "Request failed"))
       }
       if (data.sessionId) setSessionId(data.sessionId as string)
@@ -311,8 +529,26 @@ export default function ChatPage() {
           model: modelUsed,
         },
       ])
-      // Pick up the new/reordered session (title, position) in the sidebar.
-      refreshSessions()
+      // Track how full the context window now is (drives the summarize prompt).
+      const usage = data.usage as { inputTokenCount?: number } | null | undefined
+      setInputTokens(
+        typeof usage?.inputTokenCount === "number"
+          ? usage.inputTokenCount
+          : null
+      )
+      // The chat now has a server id, so it's no longer a "new chat in project".
+      if (isNewChat) setComposerProjectId(null)
+      if (filedUnderProject) {
+        // Filed under a project: it won't appear in the unfiled Chats list;
+        // refresh project counts and, if open, that project's chat list.
+        refreshProjects()
+        if (activeProjectId === filedUnderProject) {
+          loadProjectChats(filedUnderProject)
+        }
+      } else {
+        // Pick up the new/reordered session (title, position) in the sidebar.
+        refreshSessions()
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.")
       // Drop the user turn back into the input so it isn't lost.
@@ -323,15 +559,116 @@ export default function ChatPage() {
     }
   }
 
+  // Compact the current chat: the server summarizes the older turns and keeps
+  // the recent ones verbatim, so subsequent sends fit the window again.
+  async function handleSummarize() {
+    if (!sessionId || isSummarizing || isLoading) return
+    setIsSummarizing(true)
+    setError(null)
+    try {
+      const res = await fetch("/api/chat/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      })
+      const data = await readJson(res)
+      if (!res.ok) {
+        throw new Error(errorFor(res, data, "Couldn't summarize this chat"))
+      }
+      if (data?.summarized === false) {
+        setNotice("This chat is too short to summarize yet.")
+        return
+      }
+      // The summary is stored server-side; the next send will use it, so the
+      // window pressure is relieved. Hide the prompt and confirm.
+      setInputTokens(null)
+      setContextLimitHit(false)
+      const droppedOldest =
+        typeof data?.droppedOldest === "number" ? data.droppedOldest : 0
+      setNotice(
+        droppedOldest > 0
+          ? `Earlier messages were summarized to save space; the ${droppedOldest} oldest were too long to include and were dropped from context. You can keep chatting.`
+          : "Earlier messages were summarized to save space — you can keep chatting."
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't summarize this chat.")
+    } finally {
+      setIsSummarizing(false)
+    }
+  }
+
   // The greeting-centred empty state only appears once we've confirmed there's
   // no conversation to show and nothing is in flight.
   const showGreeting = !isResuming && !isLoading && messages.length === 0
   const greeting = greetingText()
 
+  // Context-window prompt: shown as we near the limit (proactive) or after a
+  // hard rejection. Summarizing needs a persisted chat, so it's gated on a
+  // sessionId; the near-limit check compares the last turn's input tokens.
+  const contextWindow = contextWindowFor(model)
+  const nearLimit =
+    inputTokens != null && inputTokens >= contextWindow * CONTEXT_WARN_RATIO
+  const contextPct =
+    inputTokens != null
+      ? Math.min(100, Math.round((inputTokens / contextWindow) * 100))
+      : null
+  const showContextBanner =
+    !bannerDismissed && (contextLimitHit || (nearLimit && !!sessionId))
+
   // The composer is rendered in two places — centred under the greeting, and
   // pinned to the bottom during a conversation — so it lives in one variable.
   const composer = (
     <>
+      {showContextBanner && (
+        <div className="border-primary/40 bg-primary/5 text-foreground mb-2 rounded-lg border px-3 py-2.5 text-sm">
+          <p className="font-medium">
+            {contextLimitHit
+              ? "This chat has reached the model's context limit."
+              : `This chat is getting long${
+                  contextPct != null
+                    ? ` — about ${contextPct}% of the context window`
+                    : ""
+                }.`}
+          </p>
+          <p className="text-muted-foreground mt-0.5 text-xs">
+            Summarize the earlier messages to keep going (recent messages stay
+            intact), or start a new chat.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleSummarize}
+              disabled={isSummarizing || isLoading || !sessionId}
+            >
+              {isSummarizing ? "Summarizing…" : "Summarize & continue"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleNewChat}
+              disabled={isSummarizing}
+            >
+              Start new chat
+            </Button>
+            {!contextLimitHit && (
+              <button
+                type="button"
+                onClick={() => setBannerDismissed(true)}
+                className="text-muted-foreground hover:text-foreground ml-auto text-xs"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {notice && (
+        <div className="border-border bg-muted text-muted-foreground mb-2 rounded-lg border px-3 py-2 text-xs">
+          {notice}
+        </div>
+      )}
       {error && (
         <div className="border-destructive/40 bg-destructive/10 text-destructive mb-2 rounded-lg border px-3 py-2 text-sm">
           {error}
@@ -448,14 +785,28 @@ export default function ChatPage() {
               )}
             >
               <ChatSidebar
+                activeTab={activeTab}
+                onTabChange={handleTabChange}
+                disabled={sidebarDisabled}
                 sessions={sessions}
                 activeSessionId={sessionId}
                 isLoadingSessions={isLoadingSessions}
-                disabled={sidebarDisabled}
                 onSelect={handleSelectSession}
                 onNewChat={handleNewChat}
                 onDelete={handleDeleteSession}
                 onRename={handleRenameSession}
+                onMoveToProject={handleMoveToProject}
+                projects={projects}
+                isLoadingProjects={isLoadingProjects}
+                activeProjectId={activeProjectId}
+                projectChats={projectChats}
+                isLoadingProjectChats={isLoadingProjectChats}
+                onOpenProject={handleOpenProject}
+                onCloseProject={handleCloseProject}
+                onNewProject={handleNewProject}
+                onRenameProject={handleRenameProject}
+                onDeleteProject={handleDeleteProject}
+                onNewChatInProject={handleNewChatInProject}
               />
             </div>
 
