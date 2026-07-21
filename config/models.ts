@@ -53,6 +53,12 @@ export const MODELS: ModelConfig[] = [
     description: "OpenAI GPT-5.5",
     contextWindow: 128_000,
   },
+  {
+    id: "sfdc_ai__DefaultVertexAIGemini35Flash",
+    label: "Gemini 3.5 Flash (Vertex AI)",
+    description: "Google Gemini 3.5 Flash, via Vertex AI",
+    contextWindow: 1_000_000,
+  },
 ]
 
 /** Fallback window for a model that somehow lacks one configured. */
@@ -93,4 +99,7 @@ export const GENERATION_TIMEOUT_MS = 28_000
  * The Models API accepts a message with role "system".
  */
 export const SYSTEM_PROMPT =
-  "You are a helpful assistant. Answer clearly and concisely."
+  "You are a helpful assistant. Answer clearly and concisely. " +
+  "Use Markdown formatting. Always wrap code, commands, and file contents in " +
+  "fenced code blocks (triple backticks) with a language tag, e.g. ```python — " +
+  "never present code as plain text or with ad-hoc separators."

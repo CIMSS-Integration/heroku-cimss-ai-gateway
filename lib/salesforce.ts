@@ -217,7 +217,17 @@ export async function chatGenerateWithTimeout(
 /**
  * Pull the token-usage accounting out of the Models API response. The
  * chat-generations response nests it under generationDetails.parameters
- * ({ usage: {...}, model }); we defensively check a couple of known shapes.
+ * ({ usage: {...}, model }).
+ *
+ * Salesforce passes each provider's usage through in that provider's own
+ * shape, so the key names differ by model family:
+ *   - Bedrock/Anthropic → camelCase: inputTokenCount / outputTokenCount /
+ *     totalTokenCount / cacheReadInputTokenCount / cacheWriteInputTokenCount
+ *   - OpenAI/GPT → snake_case: prompt_tokens / completion_tokens /
+ *     total_tokens, with cached prompt tokens under
+ *     prompt_tokens_details.cached_tokens (no cache-write equivalent)
+ * We read the first defined alias for each field, checking both the `usage`
+ * object and `params` itself, so every configured model reports usage.
  */
 function extractUsage(data: unknown): ChatUsage | null {
   const d = data as {
@@ -230,13 +240,30 @@ function extractUsage(data: unknown): ChatUsage | null {
   const usage = (params.usage ?? {}) as Record<string, unknown>
   const num = (v: unknown): number | undefined =>
     typeof v === "number" ? v : undefined
+  // First defined numeric value across aliases, looked up on `usage` then
+  // `params` (some providers put counts directly on the parameters block).
+  const pick = (...keys: string[]): number | undefined => {
+    for (const k of keys) {
+      const v = num(usage[k]) ?? num(params[k])
+      if (v !== undefined) return v
+    }
+    return undefined
+  }
+  // OpenAI nests cached prompt tokens one level deeper.
+  const promptDetails = (usage.prompt_tokens_details ??
+    params.prompt_tokens_details) as Record<string, unknown> | undefined
 
   return {
-    inputTokenCount: num(usage.inputTokenCount),
-    outputTokenCount: num(usage.outputTokenCount),
-    totalTokenCount: num(usage.totalTokenCount),
-    cacheWriteInputTokenCount: num(usage.cacheWriteInputTokenCount),
-    cacheReadInputTokenCount: num(usage.cacheReadInputTokenCount),
+    inputTokenCount: pick("inputTokenCount", "prompt_tokens", "promptTokens"),
+    outputTokenCount: pick(
+      "outputTokenCount",
+      "completion_tokens",
+      "completionTokens"
+    ),
+    totalTokenCount: pick("totalTokenCount", "total_tokens", "totalTokens"),
+    cacheWriteInputTokenCount: pick("cacheWriteInputTokenCount"),
+    cacheReadInputTokenCount:
+      pick("cacheReadInputTokenCount") ?? num(promptDetails?.cached_tokens),
     model: typeof params.model === "string" ? params.model : undefined,
   }
 }
