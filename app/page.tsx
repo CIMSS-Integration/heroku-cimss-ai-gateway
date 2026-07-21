@@ -20,6 +20,11 @@ import {
 import { ScrollButton } from "@/components/ui/scroll-button"
 import { Loader } from "@/components/ui/loader"
 import { Button } from "@/components/ui/button"
+import { useConfirm } from "@/components/ui/confirm-dialog"
+import {
+  NewProjectDialog,
+  type NewProjectFields,
+} from "@/components/ui/new-project-dialog"
 import { ChatSidebar, type SidebarTab } from "@/components/chat-sidebar"
 import {
   MODELS,
@@ -95,6 +100,8 @@ function errorFor(
 }
 
 export default function ChatPage() {
+  const confirm = useConfirm()
+  const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [model, setModel] = useState(DEFAULT_MODEL)
   const [messages, setMessages] = useState<ChatMessageWithModel[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -335,29 +342,21 @@ export default function ChatPage() {
     setIsSidebarOpen(false)
   }
 
-  async function handleNewProject() {
-    const name = window.prompt("Project name")
-    if (name === null) return
-    if (!name.trim()) return
-    const instructions = window.prompt(
-      "Optional project instructions (applied to every chat in this project). Leave blank to skip."
-    )
-    // A public project is shared with everyone: they can view all chats in it
-    // and add their own, but only you can rename/delete it (and each chat's
-    // creator controls their own chat). Default is private.
-    const isPublic = window.confirm(
-      "Make this a PUBLIC project?\n\n" +
-        "OK — Public: shared with everyone. Others can view all chats here and add their own; only you can rename or delete the project.\n\n" +
-        "Cancel — Private: visible only to you."
-    )
+  function handleNewProject() {
+    setNewProjectOpen(true)
+  }
+
+  // Create a project from the New-Project modal's fields (name / instructions /
+  // public). The modal handles its own validation and closing.
+  async function createProjectFromDialog(fields: NewProjectFields) {
     try {
       const res = await fetch("/api/chat/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name,
-          instructions: instructions ?? undefined,
-          isPublic,
+          name: fields.name,
+          instructions: fields.instructions || undefined,
+          isPublic: fields.isPublic,
         }),
       })
       if (!res.ok) throw new Error()
@@ -392,13 +391,53 @@ export default function ChatPage() {
     }
   }
 
-  async function handleDeleteProject(id: string) {
-    if (
-      !window.confirm(
-        "Delete this project? Its chats are kept and moved back to Chats."
-      )
+  // Toggle an existing project between private and public (shared). Creator-only
+  // (the server 403s otherwise). Confirm first — it's an outward-facing change
+  // that exposes/withdraws the project's chats to every user.
+  async function handleToggleProjectPublic(id: string, makePublic: boolean) {
+    const confirmed = await confirm(
+      makePublic
+        ? {
+            title: "Share this project?",
+            body: "All chats in it become visible to every signed-in user (view-only for them). They can also add their own chats. Only you can rename or delete it.",
+            confirmLabel: "Share",
+          }
+        : {
+            title: "Make this project private?",
+            body: "Other users will lose access to it and its chats. Any chats they added here move back to their own unfiled list.",
+            confirmLabel: "Make private",
+          }
     )
-      return
+    if (!confirmed) return
+
+    const previous = projects
+    setProjects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, isPublic: makePublic } : p))
+    )
+    try {
+      const res = await fetch(`/api/chat/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isPublic: makePublic }),
+      })
+      if (!res.ok) throw new Error()
+      // Membership counts / other users' chats may shift; re-sync.
+      refreshProjects()
+      if (activeProjectId === id) loadProjectChats(id)
+    } catch {
+      setProjects(previous)
+      setError("Couldn't update sharing for that project.")
+    }
+  }
+
+  async function handleDeleteProject(id: string) {
+    const ok = await confirm({
+      title: "Delete this project?",
+      body: "Its chats are kept and moved back to Chats.",
+      confirmLabel: "Delete",
+      danger: true,
+    })
+    if (!ok) return
     try {
       const res = await fetch(`/api/chat/projects/${id}`, { method: "DELETE" })
       if (!res.ok) throw new Error()
@@ -464,7 +503,13 @@ export default function ChatPage() {
   }
 
   async function handleDeleteSession(id: string) {
-    if (!window.confirm("Delete this chat? This can't be undone.")) return
+    const ok = await confirm({
+      title: "Delete this chat?",
+      body: "This can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    })
+    if (!ok) return
 
     try {
       const res = await fetch(`/api/chat/sessions/${id}`, {
@@ -802,6 +847,11 @@ export default function ChatPage() {
           </div>
         ) : (
           <div className="flex h-dvh w-full">
+            <NewProjectDialog
+              open={newProjectOpen}
+              onOpenChange={setNewProjectOpen}
+              onCreate={createProjectFromDialog}
+            />
             {isSidebarOpen && (
               <div
                 className="fixed inset-0 z-30 bg-black/30 md:hidden"
@@ -837,6 +887,7 @@ export default function ChatPage() {
                 onNewProject={handleNewProject}
                 onRenameProject={handleRenameProject}
                 onDeleteProject={handleDeleteProject}
+                onToggleProjectPublic={handleToggleProjectPublic}
                 onNewChatInProject={handleNewChatInProject}
               />
             </div>

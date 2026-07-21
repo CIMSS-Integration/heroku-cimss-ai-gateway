@@ -326,14 +326,15 @@ export async function getProject(
 }
 
 /**
- * Updates a project's name and/or instructions. Scoped to its owner. Returns
- * the stored name (reflecting normalization/truncation), or null if the project
- * doesn't exist / isn't owned by this user.
+ * Updates a project's name, instructions, and/or public-sharing flag. Scoped to
+ * its owner (creator-only — the route additionally 403s non-owners). Each field
+ * is only touched when provided. Returns the stored name (reflecting
+ * normalization/truncation), or null if the project doesn't exist / isn't owned.
  */
 export async function updateProject(
   projectId: string,
   sfUsername: string,
-  fields: { name?: string; instructions?: string | null }
+  fields: { name?: string; instructions?: string | null; isPublic?: boolean }
 ): Promise<string | null> {
   const finalName =
     fields.name !== undefined ? deriveProjectName(fields.name) : undefined
@@ -343,6 +344,7 @@ export async function updateProject(
     `update ai.chat_project
      set name = coalesce($3, name),
          instructions = case when $4::boolean then $5 else instructions end,
+         is_public = case when $6::boolean then $7 else is_public end,
          updated_at = now()
      where id = $1 and sf_username = $2 and archived_at is null
      returning name`,
@@ -354,6 +356,8 @@ export async function updateProject(
       fields.instructions !== undefined
         ? (fields.instructions?.trim() || null)
         : null,
+      fields.isPublic !== undefined,
+      fields.isPublic ?? false,
     ]
   )
   const row = result.rows[0]

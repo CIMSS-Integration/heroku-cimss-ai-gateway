@@ -7,8 +7,10 @@ import {
   Folder,
   FolderInput,
   Globe,
+  Lock,
   Pencil,
   PenSquare,
+  Share2,
   Trash2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -42,6 +44,7 @@ type ChatSidebarProps = {
   onNewProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
+  onToggleProjectPublic: (id: string, makePublic: boolean) => void
   onNewChatInProject: (projectId: string) => void
 }
 
@@ -308,6 +311,7 @@ type ProjectRowProps = {
   onOpen: (id: string) => void
   onRename: (id: string, name: string) => void
   onDelete: (id: string) => void
+  onToggleShare: (id: string, makePublic: boolean) => void
 }
 
 function ProjectRow({
@@ -316,6 +320,7 @@ function ProjectRow({
   onOpen,
   onRename,
   onDelete,
+  onToggleShare,
 }: ProjectRowProps) {
   const [editing, setEditing] = useState(false)
 
@@ -352,10 +357,23 @@ function ProjectRow({
         <span className="text-muted-foreground shrink-0 text-xs group-hover/session:hidden">
           {project.chatCount}
         </span>
-        {/* Only the creator can rename/delete a project. Non-owned (public)
-            projects show no manage actions. */}
+        {/* Only the creator can share/rename/delete a project. Non-owned
+            (public) projects show no manage actions. */}
         {project.isOwner && (
           <>
+            <RowAction
+              label={project.isPublic ? "Make private" : "Share (make public)"}
+              onActivate={() =>
+                !disabled && onToggleShare(project.id, !project.isPublic)
+              }
+              className="hover:text-foreground"
+            >
+              {project.isPublic ? (
+                <Lock className="h-3.5 w-3.5" />
+              ) : (
+                <Share2 className="h-3.5 w-3.5" />
+              )}
+            </RowAction>
             <RowAction
               label="Rename project"
               onActivate={() => !disabled && setEditing(true)}
@@ -425,6 +443,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
     onNewProject,
     onRenameProject,
     onDeleteProject,
+    onToggleProjectPublic,
     onNewChatInProject,
   } = props
 
@@ -615,6 +634,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
                           onOpen={onOpenProject}
                           onRename={onRenameProject}
                           onDelete={onDeleteProject}
+                          onToggleShare={onToggleProjectPublic}
                         />
                       ))}
                     </ul>
@@ -634,6 +654,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
                           onOpen={onOpenProject}
                           onRename={onRenameProject}
                           onDelete={onDeleteProject}
+                          onToggleShare={onToggleProjectPublic}
                         />
                       ))}
                     </ul>

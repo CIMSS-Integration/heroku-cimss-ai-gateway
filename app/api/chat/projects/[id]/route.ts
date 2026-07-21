@@ -56,9 +56,10 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { name, instructions } = (payload ?? {}) as {
+  const { name, instructions, isPublic } = (payload ?? {}) as {
     name?: unknown
     instructions?: unknown
+    isPublic?: unknown
   }
   if (name !== undefined && (typeof name !== "string" || name.trim().length === 0)) {
     return NextResponse.json(
@@ -76,9 +77,15 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       { status: 400 }
     )
   }
-  if (name === undefined && instructions === undefined) {
+  if (isPublic !== undefined && typeof isPublic !== "boolean") {
     return NextResponse.json(
-      { error: "Provide `name` and/or `instructions` to update." },
+      { error: "`isPublic` must be a boolean if provided." },
+      { status: 400 }
+    )
+  }
+  if (name === undefined && instructions === undefined && isPublic === undefined) {
+    return NextResponse.json(
+      { error: "Provide `name`, `instructions`, and/or `isPublic` to update." },
       { status: 400 }
     )
   }
@@ -104,6 +111,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     const newName = await updateProject(id, sfUsername, {
       name: name as string | undefined,
       instructions: instructions as string | null | undefined,
+      isPublic: isPublic as boolean | undefined,
     })
     if (!newName) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
