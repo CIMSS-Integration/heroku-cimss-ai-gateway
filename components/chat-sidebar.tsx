@@ -6,6 +6,7 @@ import {
   FolderPlus,
   Folder,
   FolderInput,
+  Globe,
   Pencil,
   PenSquare,
   Trash2,
@@ -196,6 +197,9 @@ function SessionRow({
   }
 
   const moveTargets = projects.filter((p) => p.id !== session.projectId)
+  // A chat surfaced from a public project that the viewer didn't create is
+  // view-only: no move/rename/delete, and we badge whose chat it is instead.
+  const canManage = session.isOwner !== false
 
   return (
     <li ref={rowRef} className="relative">
@@ -214,35 +218,48 @@ function SessionRow({
           className="min-w-0 flex-1 truncate"
           onDoubleClick={(e) => {
             e.stopPropagation()
-            if (!disabled) setEditing(true)
+            if (!disabled && canManage) setEditing(true)
           }}
         >
           {session.title || "New chat"}
         </span>
-        <RowAction
-          label="Move to project"
-          onActivate={() => !disabled && setMenuOpen((o) => !o)}
-          className="hover:text-foreground"
-        >
-          <FolderInput className="h-3.5 w-3.5" />
-        </RowAction>
-        <RowAction
-          label="Rename chat"
-          onActivate={() => !disabled && setEditing(true)}
-          className="hover:text-foreground"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </RowAction>
-        <RowAction
-          label="Delete chat"
-          onActivate={() => onDelete(session.id)}
-          className="hover:text-destructive"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </RowAction>
+        {canManage ? (
+          <>
+            <RowAction
+              label="Move to project"
+              onActivate={() => !disabled && setMenuOpen((o) => !o)}
+              className="hover:text-foreground"
+            >
+              <FolderInput className="h-3.5 w-3.5" />
+            </RowAction>
+            <RowAction
+              label="Rename chat"
+              onActivate={() => !disabled && setEditing(true)}
+              className="hover:text-foreground"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </RowAction>
+            <RowAction
+              label="Delete chat"
+              onActivate={() => onDelete(session.id)}
+              className="hover:text-destructive"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </RowAction>
+          </>
+        ) : (
+          session.creator && (
+            <span
+              className="text-muted-foreground max-w-[45%] shrink-0 truncate text-[10px]"
+              title={`Shared by ${session.creator}`}
+            >
+              {session.creator}
+            </span>
+          )
+        )}
       </button>
 
-      {menuOpen && (
+      {canManage && menuOpen && (
         <div className="border-border bg-popover absolute right-2 top-full z-10 mt-1 w-52 rounded-lg border p-1 shadow-md">
           <p className="text-muted-foreground px-2 py-1 text-xs font-medium">
             Move to project
@@ -326,25 +343,35 @@ function ProjectRow({
         disabled={disabled}
         className="group/session hover:bg-sidebar-accent/60 text-muted-foreground hover:text-sidebar-foreground flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:opacity-60"
       >
-        <Folder className="h-4 w-4 shrink-0" />
+        {project.isPublic ? (
+          <Globe className="text-primary h-4 w-4 shrink-0" />
+        ) : (
+          <Folder className="h-4 w-4 shrink-0" />
+        )}
         <span className="min-w-0 flex-1 truncate">{project.name}</span>
         <span className="text-muted-foreground shrink-0 text-xs group-hover/session:hidden">
           {project.chatCount}
         </span>
-        <RowAction
-          label="Rename project"
-          onActivate={() => !disabled && setEditing(true)}
-          className="hover:text-foreground"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </RowAction>
-        <RowAction
-          label="Delete project"
-          onActivate={() => onDelete(project.id)}
-          className="hover:text-destructive"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </RowAction>
+        {/* Only the creator can rename/delete a project. Non-owned (public)
+            projects show no manage actions. */}
+        {project.isOwner && (
+          <>
+            <RowAction
+              label="Rename project"
+              onActivate={() => !disabled && setEditing(true)}
+              className="hover:text-foreground"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </RowAction>
+            <RowAction
+              label="Delete project"
+              onActivate={() => onDelete(project.id)}
+              className="hover:text-destructive"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </RowAction>
+          </>
+        )}
       </button>
     </li>
   )
@@ -402,6 +429,11 @@ export function ChatSidebar(props: ChatSidebarProps) {
   } = props
 
   const openProject = projects.find((p) => p.id === activeProjectId) ?? null
+  // "Your projects" (owned, may be public) vs "Public projects" (shared by
+  // others, view-only). Non-owned projects are only visible because they're
+  // public, so this split is exhaustive.
+  const ownedProjects = projects.filter((p) => p.isOwner)
+  const sharedProjects = projects.filter((p) => !p.isOwner)
 
   return (
     <div className="bg-sidebar text-sidebar-foreground flex h-full w-full flex-col">
@@ -488,12 +520,23 @@ export function ChatSidebar(props: ChatSidebarProps) {
               All projects
             </button>
           </div>
-          <div className="flex items-center gap-2 px-4 pb-1">
-            <Folder className="text-primary h-4 w-4 shrink-0" />
+          <div className="flex items-center gap-2 px-4 pb-0.5">
+            {openProject.isPublic ? (
+              <Globe className="text-primary h-4 w-4 shrink-0" />
+            ) : (
+              <Folder className="text-primary h-4 w-4 shrink-0" />
+            )}
             <span className="min-w-0 flex-1 truncate text-sm font-semibold">
               {openProject.name}
             </span>
           </div>
+          {openProject.isPublic && (
+            <p className="text-muted-foreground px-4 pb-1 text-[11px]">
+              {openProject.isOwner
+                ? "Shared with everyone — others can view your chats here."
+                : "Public project — you can read all chats and add your own."}
+            </p>
+          )}
           <div className="px-2 pb-2">
             <button
               type="button"
@@ -557,18 +600,46 @@ export function ChatSidebar(props: ChatSidebarProps) {
                 No projects yet
               </p>
             ) : (
-              <ul className="space-y-0.5">
-                {projects.map((project) => (
-                  <ProjectRow
-                    key={project.id}
-                    project={project}
-                    disabled={disabled}
-                    onOpen={onOpenProject}
-                    onRename={onRenameProject}
-                    onDelete={onDeleteProject}
-                  />
-                ))}
-              </ul>
+              <>
+                {ownedProjects.length > 0 && (
+                  <>
+                    <p className="text-muted-foreground px-3 pt-2 pb-1 text-xs font-medium">
+                      Your projects
+                    </p>
+                    <ul className="space-y-0.5">
+                      {ownedProjects.map((project) => (
+                        <ProjectRow
+                          key={project.id}
+                          project={project}
+                          disabled={disabled}
+                          onOpen={onOpenProject}
+                          onRename={onRenameProject}
+                          onDelete={onDeleteProject}
+                        />
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {sharedProjects.length > 0 && (
+                  <>
+                    <p className="text-muted-foreground px-3 pt-3 pb-1 text-xs font-medium">
+                      Public projects
+                    </p>
+                    <ul className="space-y-0.5">
+                      {sharedProjects.map((project) => (
+                        <ProjectRow
+                          key={project.id}
+                          project={project}
+                          disabled={disabled}
+                          onOpen={onOpenProject}
+                          onRename={onRenameProject}
+                          onDelete={onDeleteProject}
+                        />
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </>
             )}
           </div>
         </>

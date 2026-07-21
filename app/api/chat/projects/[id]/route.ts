@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { archiveProject, getProject, updateProject } from "@/lib/chat-store"
+import {
+  archiveProject,
+  getProject,
+  updateProject,
+} from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
 
 // Same rationale as app/api/chat/route.ts — pg needs the Node runtime.
@@ -81,12 +85,26 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 
   try {
     const sfUsername = await getSalesforceUsername()
-    const newName = sfUsername
-      ? await updateProject(id, sfUsername, {
-          name: name as string | undefined,
-          instructions: instructions as string | null | undefined,
-        })
-      : null
+    if (!sfUsername) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    }
+    // Editing a project is creator-only. Distinguish "not visible" (404) from
+    // "visible but not yours" (403) so a public project's viewers get a clear
+    // signal rather than a misleading 404.
+    const project = await getProject(id, sfUsername)
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    }
+    if (!project.isOwner) {
+      return NextResponse.json(
+        { error: "Only the project's creator can edit it." },
+        { status: 403 }
+      )
+    }
+    const newName = await updateProject(id, sfUsername, {
+      name: name as string | undefined,
+      instructions: instructions as string | null | undefined,
+    })
     if (!newName) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
     }
@@ -110,7 +128,22 @@ export async function DELETE(_request: Request, { params }: RouteParams) {
 
   try {
     const sfUsername = await getSalesforceUsername()
-    const archived = sfUsername ? await archiveProject(id, sfUsername) : false
+    if (!sfUsername) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    }
+    // Deleting a project is creator-only (404 if not visible, 403 if visible
+    // via public sharing but not owned).
+    const project = await getProject(id, sfUsername)
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    }
+    if (!project.isOwner) {
+      return NextResponse.json(
+        { error: "Only the project's creator can delete it." },
+        { status: 403 }
+      )
+    }
+    const archived = await archiveProject(id, sfUsername)
     if (!archived) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
     }

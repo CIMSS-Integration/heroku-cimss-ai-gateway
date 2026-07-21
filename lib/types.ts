@@ -32,6 +32,16 @@ export type ChatSessionSummary = {
   updatedAt: string
   /** The project this chat is filed under, or null when unfiled. */
   projectId: string | null
+  /**
+   * Whether the signed-in user created this chat. Only meaningful for chats
+   * surfaced inside a public project (where other users' chats are visible);
+   * omitted/true for a user's own lists. Drives whether manage actions and the
+   * composer are enabled.
+   */
+  isOwner?: boolean
+  /** Salesforce username of the chat's creator — shown as a badge in public
+   *  projects so viewers can see whose chat it is. Null/omitted for own chats. */
+  creator?: string | null
 }
 
 /** Sidebar-facing summary of a project (no chats). */
@@ -41,6 +51,10 @@ export type ChatProjectSummary = {
   updatedAt: string
   /** Count of non-archived chats filed under the project. */
   chatCount: number
+  /** Shared with every user (view-only for non-creators) when true. */
+  isPublic: boolean
+  /** Whether the signed-in user created (and thus can manage) this project. */
+  isOwner: boolean
 }
 
 /** A project plus the chats filed under it. */

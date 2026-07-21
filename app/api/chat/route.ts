@@ -186,22 +186,46 @@ export async function POST(request: Request) {
   let projectInstructions: string | null = null
   let summary: string | null = null
   let summarizedCount = 0
-  try {
-    if (activeSessionIdInput) {
-      const ctx = await getSessionContext(activeSessionIdInput, sfUsername)
-      if (ctx) {
-        projectInstructions = ctx.projectInstructions
-        summary = ctx.summary
-        summarizedCount = ctx.summarizedCount
-      }
-    } else if (newChatProjectId) {
+
+  // For an existing chat, enforce visibility + creator-only writes BEFORE we
+  // spend a model call: a chat you can't see → 404; a shared (public-project)
+  // chat you didn't create → 403 (view-only). A transient lookup error is
+  // non-fatal — `appendConversation`'s creator-scoped row lock is the backstop,
+  // so a hiccup never blocks a legitimate owner (nor lets a non-owner persist).
+  if (activeSessionIdInput) {
+    let ctx: Awaited<ReturnType<typeof getSessionContext>> | undefined
+    try {
+      ctx = await getSessionContext(activeSessionIdInput, sfUsername)
+    } catch (err) {
+      console.error("[/api/chat] session context lookup failed", err)
+    }
+    if (ctx === null) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+    }
+    if (ctx && !ctx.isOwner) {
+      return NextResponse.json(
+        {
+          error:
+            "This is a shared chat — only its creator can add messages. Start your own chat in the project to contribute.",
+          code: "read_only",
+        },
+        { status: 403 }
+      )
+    }
+    if (ctx) {
+      projectInstructions = ctx.projectInstructions
+      summary = ctx.summary
+      summarizedCount = ctx.summarizedCount
+    }
+  } else if (newChatProjectId) {
+    try {
       projectInstructions = await getProjectInstructions(
         newChatProjectId,
         sfUsername
       )
+    } catch (err) {
+      console.error("[/api/chat] project instructions lookup failed", err)
     }
-  } catch (err) {
-    console.error("[/api/chat] session context lookup failed", err)
   }
   const messagesForModel = buildModelMessages(typedMessages, {
     projectInstructions,

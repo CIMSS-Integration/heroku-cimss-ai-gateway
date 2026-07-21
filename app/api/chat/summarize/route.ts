@@ -62,6 +62,14 @@ export async function POST(request: Request) {
     if (!session) {
       return NextResponse.json({ error: "Chat not found" }, { status: 404 })
     }
+    // Compaction rewrites the chat's stored summary — a creator-only write.
+    // A viewer of a shared (public-project) chat can see it but not compact it.
+    if (session.isOwner === false) {
+      return NextResponse.json(
+        { error: "Only the chat's creator can summarize it." },
+        { status: 403 }
+      )
+    }
 
     // Only user/assistant turns are stored, but filter defensively.
     const conversation = session.messages.filter((m) => m.role !== "system")

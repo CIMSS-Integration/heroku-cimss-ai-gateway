@@ -40,9 +40,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { name, instructions } = (payload ?? {}) as {
+  const { name, instructions, isPublic } = (payload ?? {}) as {
     name?: unknown
     instructions?: unknown
+    isPublic?: unknown
   }
   if (typeof name !== "string" || name.trim().length === 0) {
     return NextResponse.json(
@@ -56,6 +57,12 @@ export async function POST(request: Request) {
       { status: 400 }
     )
   }
+  if (isPublic !== undefined && typeof isPublic !== "boolean") {
+    return NextResponse.json(
+      { error: "`isPublic` must be a boolean if provided." },
+      { status: 400 }
+    )
+  }
 
   try {
     const sfUsername = await getSalesforceUsername()
@@ -65,7 +72,12 @@ export async function POST(request: Request) {
         { status: 403 }
       )
     }
-    const project = await createProject(sfUsername, name, instructions ?? null)
+    const project = await createProject(
+      sfUsername,
+      name,
+      instructions ?? null,
+      isPublic === true
+    )
     if (!project) {
       return NextResponse.json(
         { error: "`name` must be a non-empty string." },

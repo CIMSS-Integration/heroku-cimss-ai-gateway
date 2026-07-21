@@ -118,6 +118,9 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [isResuming, setIsResuming] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // True when the open chat belongs to a public project and was created by
+  // someone else: visible but view-only (only its creator can add messages).
+  const [activeChatReadOnly, setActiveChatReadOnly] = useState(false)
 
   // Context-window management. `inputTokens` is the last reply's input-token
   // count (from Salesforce) — how full the window is. `contextLimitHit` is set
@@ -136,7 +139,11 @@ export default function ChatPage() {
   const [sfUsername, setSfUsername] = useState<string | null>(null)
   const [linkedProviders, setLinkedProviders] = useState<string[]>([])
 
-  const canSend = input.trim().length > 0 && !isLoading && !isSummarizing
+  const canSend =
+    input.trim().length > 0 &&
+    !isLoading &&
+    !isSummarizing &&
+    !activeChatReadOnly
   const sidebarDisabled = isLoading || isResuming
 
   async function refreshSessions(): Promise<ChatSessionSummary[]> {
@@ -194,10 +201,14 @@ export default function ChatPage() {
         id: string
         model: string
         messages: ChatMessageWithModel[]
+        isOwner?: boolean
       } | null
       if (session) {
         setSessionId(session.id)
         setMessages(session.messages)
+        // Only a public-project chat you didn't create comes back with
+        // isOwner === false; everything else is writable.
+        setActiveChatReadOnly(session.isOwner === false)
         if (MODELS.some((m) => m.id === session.model)) {
           setModel(session.model)
         }
@@ -283,6 +294,7 @@ export default function ChatPage() {
     setInput("")
     setError(null)
     setComposerProjectId(null)
+    setActiveChatReadOnly(false)
     resetContextState()
     setIsSidebarOpen(false)
   }
@@ -315,8 +327,10 @@ export default function ChatPage() {
     setMessages([])
     setInput("")
     setError(null)
-    // First send of this chat files it under the project.
+    // First send of this chat files it under the project. Even in a public
+    // project this is the user's own new chat, so it's writable.
     setComposerProjectId(projectId)
+    setActiveChatReadOnly(false)
     resetContextState()
     setIsSidebarOpen(false)
   }
@@ -328,6 +342,14 @@ export default function ChatPage() {
     const instructions = window.prompt(
       "Optional project instructions (applied to every chat in this project). Leave blank to skip."
     )
+    // A public project is shared with everyone: they can view all chats in it
+    // and add their own, but only you can rename/delete it (and each chat's
+    // creator controls their own chat). Default is private.
+    const isPublic = window.confirm(
+      "Make this a PUBLIC project?\n\n" +
+        "OK — Public: shared with everyone. Others can view all chats here and add their own; only you can rename or delete the project.\n\n" +
+        "Cancel — Private: visible only to you."
+    )
     try {
       const res = await fetch("/api/chat/projects", {
         method: "POST",
@@ -335,6 +357,7 @@ export default function ChatPage() {
         body: JSON.stringify({
           name,
           instructions: instructions ?? undefined,
+          isPublic,
         }),
       })
       if (!res.ok) throw new Error()
@@ -617,7 +640,15 @@ export default function ChatPage() {
 
   // The composer is rendered in two places — centred under the greeting, and
   // pinned to the bottom during a conversation — so it lives in one variable.
-  const composer = (
+  const composer = activeChatReadOnly ? (
+    <div className="border-border bg-muted rounded-2xl border px-4 py-3 text-center text-sm">
+      <p className="text-foreground font-medium">Shared chat — view only</p>
+      <p className="text-muted-foreground mt-0.5 text-xs">
+        Only the person who created this chat can add messages. Start your own
+        chat in the project to contribute.
+      </p>
+    </div>
+  ) : (
     <>
       {showContextBanner && (
         <div className="border-primary/40 bg-primary/5 text-foreground mb-2 rounded-lg border px-3 py-2.5 text-sm">

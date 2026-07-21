@@ -3,6 +3,7 @@ import { auth } from "@clerk/nextjs/server"
 import {
   archiveSession,
   getSession,
+  getSessionAccess,
   moveSessionToProject,
   renameSession,
 } from "@/lib/chat-store"
@@ -94,6 +95,19 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "Chat not found" }, { status: 404 })
     }
 
+    // Rename / move are creator-only. A chat visible only because it's in a
+    // public project (view-only) → 403; a chat you can't see at all → 404.
+    const access = await getSessionAccess(id, sfUsername)
+    if (!access) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+    }
+    if (!access.isOwner) {
+      return NextResponse.json(
+        { error: "Only the chat's creator can change it." },
+        { status: 403 }
+      )
+    }
+
     const response: { ok: true; title?: string } = { ok: true }
 
     if (hasProject) {
@@ -138,7 +152,21 @@ export async function DELETE(_request: Request, { params }: RouteParams) {
 
   try {
     const sfUsername = await getSalesforceUsername()
-    const deleted = sfUsername ? await archiveSession(id, sfUsername) : false
+    if (!sfUsername) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+    }
+    // Deleting is creator-only (403 if visible via public sharing but not yours).
+    const access = await getSessionAccess(id, sfUsername)
+    if (!access) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+    }
+    if (!access.isOwner) {
+      return NextResponse.json(
+        { error: "Only the chat's creator can delete it." },
+        { status: 403 }
+      )
+    }
+    const deleted = await archiveSession(id, sfUsername)
     if (!deleted) {
       return NextResponse.json({ error: "Chat not found" }, { status: 404 })
     }

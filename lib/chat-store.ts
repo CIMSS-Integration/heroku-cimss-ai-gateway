@@ -40,20 +40,32 @@ async function getMessages(
   }))
 }
 
-function toSessionSummary(row: {
-  id: string
-  model: string
-  title: string | null
-  updated_at: Date
-  project_id: string | null
-}): ChatSessionSummary {
-  return {
+function toSessionSummary(
+  row: {
+    id: string
+    model: string
+    title: string | null
+    updated_at: Date
+    project_id: string | null
+    sf_username?: string
+  },
+  viewer?: string
+): ChatSessionSummary {
+  const base: ChatSessionSummary = {
     id: row.id,
     model: row.model,
     title: row.title,
     updatedAt: row.updated_at.toISOString(),
     projectId: row.project_id ?? null,
   }
+  // Ownership/creator are only surfaced when the caller selected sf_username
+  // (i.e. lists that can contain other users' chats, like a public project).
+  // For a user's own lists we omit them — the chat is implicitly theirs.
+  if (row.sf_username !== undefined) {
+    base.creator = row.sf_username
+    base.isOwner = row.sf_username === viewer
+  }
+  return base
 }
 
 /**
@@ -71,27 +83,60 @@ export async function listSessions(
      order by updated_at desc`,
     [sfUsername]
   )
-  return result.rows.map(toSessionSummary)
+  return result.rows.map((row) => toSessionSummary(row))
 }
 
-/** A single session's messages, scoped to its owner so one user can't load another's chat. */
+/**
+ * A single session's messages. Visible to its owner, or to anyone when the chat
+ * is filed under a **public** project (view-only). The returned summary carries
+ * `isOwner` so the client knows whether to allow writing; a non-owner viewing a
+ * public-project chat gets `isOwner: false` and renders it read-only.
+ */
 export async function getSession(
   sessionId: string,
   sfUsername: string
 ): Promise<ChatSessionWithMessages | null> {
   const result = await pool.query(
-    `select id, model, title, updated_at, project_id
-     from ai.chat_session
-     where id = $1 and sf_username = $2 and archived_at is null`,
+    `select s.id, s.model, s.title, s.updated_at, s.project_id, s.sf_username
+     from ai.chat_session s
+     left join ai.chat_project p
+       on p.id = s.project_id and p.archived_at is null
+     where s.id = $1 and s.archived_at is null
+       and (s.sf_username = $2 or p.is_public = true)`,
     [sessionId, sfUsername]
   )
   const session = result.rows[0]
   if (!session) return null
 
   return {
-    ...toSessionSummary(session),
+    ...toSessionSummary(session, sfUsername),
     messages: await getMessages(session.id),
   }
+}
+
+/**
+ * Lightweight access check for a session: is it visible to this user, and do
+ * they own it? Used by the write paths (`/api/chat`, session PATCH/DELETE) to
+ * return a clean 403 (visible but not yours → view-only) vs 404 (not visible),
+ * without loading the whole conversation. Returns null when not visible.
+ */
+export async function getSessionAccess(
+  sessionId: string,
+  sfUsername: string
+): Promise<{ isOwner: boolean } | null> {
+  const result = await pool.query(
+    `select s.sf_username, (p.is_public = true) as project_public
+     from ai.chat_session s
+     left join ai.chat_project p
+       on p.id = s.project_id and p.archived_at is null
+     where s.id = $1 and s.archived_at is null`,
+    [sessionId, sfUsername]
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  const isOwner = row.sf_username === sfUsername
+  const visible = isOwner || row.project_public === true
+  return visible ? { isOwner } : null
 }
 
 /** Soft-deletes a session. Returns false if it doesn't exist / isn't owned by this user. */
@@ -149,12 +194,15 @@ export async function createSession(
   projectId?: string | null
 ): Promise<string> {
   if (projectId) {
-    const owns = await pool.query(
+    // Any user may file a chat under a project they can see: their own, or a
+    // public one (they become that chat's creator either way).
+    const visible = await pool.query(
       `select 1 from ai.chat_project
-       where id = $1 and sf_username = $2 and archived_at is null`,
+       where id = $1 and archived_at is null
+         and (sf_username = $2 or is_public = true)`,
       [projectId, sfUsername]
     )
-    if (owns.rowCount === 0) {
+    if (visible.rowCount === 0) {
       throw new Error(`Project ${projectId} not found for this user`)
     }
   }
@@ -177,16 +225,21 @@ function deriveProjectName(name: string): string {
     : trimmed
 }
 
-/** A user's non-archived projects, most recently active first, with chat counts. */
+/**
+ * Projects visible to a user — their own **plus** every public project — most
+ * recently active first, with chat counts. `isOwner`/`isPublic` let the client
+ * split the list into "your projects" and "public projects" and gate manage
+ * actions. Chat counts include all members' chats for a public project.
+ */
 export async function listProjects(
   sfUsername: string
 ): Promise<ChatProjectSummary[]> {
   const result = await pool.query(
-    `select p.id, p.name, p.updated_at,
+    `select p.id, p.name, p.updated_at, p.is_public, p.sf_username,
             count(s.id) filter (where s.archived_at is null) as chat_count
      from ai.chat_project p
      left join ai.chat_session s on s.project_id = p.id
-     where p.sf_username = $1 and p.archived_at is null
+     where p.archived_at is null and (p.sf_username = $1 or p.is_public = true)
      group by p.id
      order by p.updated_at desc`,
     [sfUsername]
@@ -196,23 +249,30 @@ export async function listProjects(
     name: row.name as string,
     updatedAt: (row.updated_at as Date).toISOString(),
     chatCount: Number(row.chat_count),
+    isPublic: row.is_public === true,
+    isOwner: row.sf_username === sfUsername,
   }))
 }
 
-/** Creates a project. Returns null if the name is empty after normalization. */
+/**
+ * Creates a project. `isPublic` makes it shared (visible to everyone,
+ * view-only for non-creators). Returns null if the name is empty after
+ * normalization.
+ */
 export async function createProject(
   sfUsername: string,
   name: string,
-  instructions?: string | null
+  instructions?: string | null,
+  isPublic = false
 ): Promise<ChatProjectSummary | null> {
   const finalName = deriveProjectName(name)
   if (!finalName) return null
 
   const result = await pool.query(
-    `insert into ai.chat_project (sf_username, name, instructions)
-     values ($1, $2, $3)
-     returning id, name, updated_at`,
-    [sfUsername, finalName, instructions?.trim() || null]
+    `insert into ai.chat_project (sf_username, name, instructions, is_public)
+     values ($1, $2, $3, $4)
+     returning id, name, updated_at, is_public`,
+    [sfUsername, finalName, instructions?.trim() || null, isPublic]
   )
   const row = result.rows[0]
   return {
@@ -220,31 +280,38 @@ export async function createProject(
     name: row.name as string,
     updatedAt: (row.updated_at as Date).toISOString(),
     chatCount: 0,
+    isPublic: row.is_public === true,
+    isOwner: true,
   }
 }
 
-/** A single project plus its non-archived chats, scoped to its owner. */
+/**
+ * A single project plus its non-archived chats. Visible to its owner or, when
+ * public, to anyone. For a public project ALL members' chats are returned, each
+ * carrying `isOwner`/`creator` so the client can badge them and gate actions.
+ */
 export async function getProject(
   projectId: string,
   sfUsername: string
 ): Promise<ChatProjectWithChats | null> {
   const projectResult = await pool.query(
-    `select id, name, instructions, updated_at
+    `select id, name, instructions, updated_at, is_public, sf_username
      from ai.chat_project
-     where id = $1 and sf_username = $2 and archived_at is null`,
+     where id = $1 and archived_at is null
+       and (sf_username = $2 or is_public = true)`,
     [projectId, sfUsername]
   )
   const project = projectResult.rows[0]
   if (!project) return null
 
   const chatsResult = await pool.query(
-    `select id, model, title, updated_at, project_id
+    `select id, model, title, updated_at, project_id, sf_username
      from ai.chat_session
-     where project_id = $1 and sf_username = $2 and archived_at is null
+     where project_id = $1 and archived_at is null
      order by updated_at desc`,
-    [projectId, sfUsername]
+    [projectId]
   )
-  const chats = chatsResult.rows.map(toSessionSummary)
+  const chats = chatsResult.rows.map((row) => toSessionSummary(row, sfUsername))
 
   return {
     id: project.id as string,
@@ -252,6 +319,8 @@ export async function getProject(
     updatedAt: (project.updated_at as Date).toISOString(),
     instructions: (project.instructions as string | null) ?? null,
     chatCount: chats.length,
+    isPublic: project.is_public === true,
+    isOwner: project.sf_username === sfUsername,
     chats,
   }
 }
@@ -313,10 +382,12 @@ export async function archiveProject(
       await client.query("rollback")
       return false
     }
+    // Orphan EVERY chat in the project back to unfiled — including other users'
+    // chats in a public project — so none is left pointing at an archived
+    // project. Each lands in its own creator's unfiled list; nothing is deleted.
     await client.query(
-      `update ai.chat_session set project_id = null
-       where project_id = $1 and sf_username = $2`,
-      [projectId, sfUsername]
+      `update ai.chat_session set project_id = null where project_id = $1`,
+      [projectId]
     )
     await client.query("commit")
     return true
@@ -339,12 +410,16 @@ export async function moveSessionToProject(
   projectId: string | null
 ): Promise<boolean> {
   if (projectId) {
-    const owns = await pool.query(
+    // Target may be the user's own project or any public one; you can file your
+    // own chat into a shared project. (The chat itself stays owned by you — the
+    // update below is still scoped to sf_username.)
+    const visible = await pool.query(
       `select 1 from ai.chat_project
-       where id = $1 and sf_username = $2 and archived_at is null`,
+       where id = $1 and archived_at is null
+         and (sf_username = $2 or is_public = true)`,
       [projectId, sfUsername]
     )
-    if (owns.rowCount === 0) return false
+    if (visible.rowCount === 0) return false
   }
 
   const result = await pool.query(
@@ -363,23 +438,29 @@ export type SessionContext = {
   summary: string | null
   /** How many leading conversation messages the summary replaces. */
   summarizedCount: number
+  /** Whether the requester created this chat — only its creator may write to
+   *  it, even when it's visible via a public project (view-only for others). */
+  isOwner: boolean
 }
 
 /**
  * Reads the project instructions and compaction checkpoint for a session in one
- * query. Returns null if the session doesn't exist / isn't owned by this user.
- * Used by /api/chat to prepend project guidance and trim compacted history.
+ * query. Visible to the owner or, when the chat is in a public project, to
+ * anyone (`isOwner` distinguishes the two). Returns null if the session doesn't
+ * exist or isn't visible. Used by /api/chat to prepend project guidance, trim
+ * compacted history, and enforce that only the creator may generate.
  */
 export async function getSessionContext(
   sessionId: string,
   sfUsername: string
 ): Promise<SessionContext | null> {
   const result = await pool.query(
-    `select s.metadata, p.instructions as project_instructions
+    `select s.metadata, s.sf_username, p.instructions as project_instructions
      from ai.chat_session s
      left join ai.chat_project p
        on p.id = s.project_id and p.archived_at is null
-     where s.id = $1 and s.sf_username = $2 and s.archived_at is null`,
+     where s.id = $1 and s.archived_at is null
+       and (s.sf_username = $2 or p.is_public = true)`,
     [sessionId, sfUsername]
   )
   const row = result.rows[0]
@@ -396,6 +477,7 @@ export async function getSessionContext(
       typeof compaction.summarizedCount === "number"
         ? compaction.summarizedCount
         : 0,
+    isOwner: row.sf_username === sfUsername,
   }
 }
 
@@ -452,14 +534,19 @@ export async function setSessionSummary(
   return result.rowCount !== null && result.rowCount > 0
 }
 
-/** A project's instructions by id, scoped to its owner (null if none/foreign). */
+/**
+ * A project's instructions by id — visible to its owner or, when public, to
+ * anyone (so a chat created in someone else's shared project still picks up its
+ * guidance). Null if the project isn't visible / has no instructions.
+ */
 export async function getProjectInstructions(
   projectId: string,
   sfUsername: string
 ): Promise<string | null> {
   const result = await pool.query(
     `select instructions from ai.chat_project
-     where id = $1 and sf_username = $2 and archived_at is null`,
+     where id = $1 and archived_at is null
+       and (sf_username = $2 or is_public = true)`,
     [projectId, sfUsername]
   )
   return (result.rows[0]?.instructions as string | null) ?? null
