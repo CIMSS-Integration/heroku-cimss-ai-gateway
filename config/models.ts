@@ -54,6 +54,12 @@ export const MODELS: ModelConfig[] = [
     contextWindow: 128_000,
   },
   {
+    id: "sfdc_ai__DefaultBedrockNvidiaNemotronSuper3120b",
+    label: "Nemotron Super 3.1 (Bedrock)",
+    description: "NVIDIA Llama Nemotron Super 3.1 20B, via Amazon Bedrock",
+    contextWindow: 128_000,
+  },
+  {
     id: "sfdc_ai__DefaultVertexAIGemini35Flash",
     label: "Gemini 3.5 Flash (Vertex AI)",
     description: "Google Gemini 3.5 Flash, via Vertex AI",
