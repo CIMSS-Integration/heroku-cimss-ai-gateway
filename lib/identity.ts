@@ -33,7 +33,24 @@ export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
     .map((a) => a.provider)
     .filter((p): p is string => Boolean(p))
   const sfAccount = accounts.find((a) => isSalesforceProvider(a.provider))
-  return { sfUsername: sfAccount?.username ?? null, linkedProviders }
+  const sfUsername = sfAccount?.username ?? null
+
+  // Diagnostics for UAT #1 (intermittent "no linked account" for users who
+  // DO have one). A miss right after OAuth is usually Clerk Backend-API
+  // propagation lag; logging which sub-case we hit confirms it in prod:
+  //   - hasUser=false     → currentUser() came back null (session not ready)
+  //   - accountCount=0    → user present but external accounts not propagated
+  //   - matchedProvider set but usernameNull=true → account linked, username lag
+  if (!sfUsername) {
+    console.warn("[identity] no Salesforce username resolved", {
+      hasUser: Boolean(user),
+      accountCount: accounts.length,
+      providers: linkedProviders,
+      matchedProvider: sfAccount?.provider ?? null,
+      usernameNull: sfAccount ? sfAccount.username == null : null,
+    })
+  }
+  return { sfUsername, linkedProviders }
 }
 
 /** Convenience wrapper: just the Salesforce username (null if not linked). */

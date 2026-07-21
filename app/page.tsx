@@ -234,21 +234,33 @@ export default function ChatPage() {
     let cancelled = false
 
     async function init() {
+      // The Salesforce link can lag right after OAuth: Clerk's session is valid
+      // (auth() sees the user) but the linked external account hasn't propagated
+      // to the Backend API yet, so the first read misses and the user is wrongly
+      // shown the "no linked account" block screen (UAT #1). Retry a few times
+      // before concluding there's none — each attempt is a fresh request, so
+      // currentUser() is re-queried (retrying within one request wouldn't help,
+      // as Clerk memoizes it per request). A 401 (session not ready yet) is
+      // treated the same as a miss and retried.
       let identity: { sfUsername: string | null; linkedProviders: string[] } = {
         sfUsername: null,
         linkedProviders: [],
       }
-      try {
-        const res = await fetch("/api/identity")
-        const data = await readJson(res)
-        if (res.ok && data) {
-          identity = {
-            sfUsername: (data.sfUsername as string | null) ?? null,
-            linkedProviders: (data.linkedProviders as string[]) ?? [],
+      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+        try {
+          const res = await fetch("/api/identity")
+          const data = await readJson(res)
+          if (res.ok && data) {
+            identity = {
+              sfUsername: (data.sfUsername as string | null) ?? null,
+              linkedProviders: (data.linkedProviders as string[]) ?? [],
+            }
           }
+        } catch {
+          // Network error — treat as a miss and retry.
         }
-      } catch {
-        // Treated as "no Salesforce account" below.
+        if (identity.sfUsername) break
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 700))
       }
       if (cancelled) return
 
@@ -286,6 +298,32 @@ export default function ChatPage() {
     }
   }, [])
 
+  // Keep the Projects tab fresh without a full page reload: public projects
+  // (and chats other users add to them) are pulled once on load, so a project
+  // shared while you're already in the app wouldn't otherwise appear (UAT #3).
+  // While the Projects tab is open we refetch on window focus and on a light
+  // ~20s poll; if a project is open, its chat list is refreshed too. This is
+  // the "refetch-based" sync the Public Projects design settled on — no
+  // real-time push.
+  useEffect(() => {
+    if (!sfUsername || activeTab !== "projects") return
+    const refresh = () => {
+      // Don't clobber freshly-typed state mid-action.
+      if (isLoading || isResuming) return
+      refreshProjects()
+      if (activeProjectId) loadProjectChats(activeProjectId)
+    }
+    const interval = setInterval(refresh, 20_000)
+    window.addEventListener("focus", refresh)
+    return () => {
+      clearInterval(interval)
+      window.removeEventListener("focus", refresh)
+    }
+    // refreshProjects/loadProjectChats are stable enough (fetch + setState);
+    // re-subscribe when the tab, identity, or open project changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sfUsername, activeTab, activeProjectId, isLoading, isResuming])
+
   // Clears the context-window prompt/measurement — call whenever the active
   // conversation changes (new chat, switching chats).
   function resetContextState() {
@@ -316,6 +354,9 @@ export default function ChatPage() {
 
   function handleTabChange(tab: SidebarTab) {
     setActiveTab(tab)
+    // Opening Projects: pull the latest so a project shared by someone else
+    // shows up without a full page reload (UAT #3).
+    if (tab === "projects" && sfUsername) refreshProjects()
   }
 
   function handleOpenProject(id: string) {
@@ -833,9 +874,10 @@ export default function ChatPage() {
                 Salesforce account required
               </h1>
               <p className="text-muted-foreground text-sm">
-                You&apos;re signed in, but this app requires a linked Salesforce
-                account and we couldn&apos;t find one for your login. Please sign
-                in with Salesforce, or contact your administrator.
+                You&apos;re signed in, but we couldn&apos;t find a linked
+                Salesforce account for your login. If you just signed in, this
+                can take a moment to sync — try again. If it persists, sign in
+                with Salesforce or contact your administrator.
               </p>
               {linkedProviders.length > 0 && (
                 <p className="text-muted-foreground text-xs">
@@ -843,7 +885,12 @@ export default function ChatPage() {
                 </p>
               )}
             </div>
-            <UserButton />
+            <div className="flex items-center gap-3">
+              <Button type="button" onClick={() => window.location.reload()}>
+                Try again
+              </Button>
+              <UserButton />
+            </div>
           </div>
         ) : (
           <div className="flex h-dvh w-full">
