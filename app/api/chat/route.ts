@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import {
   chatGenerateWithTimeout,
+  generateChatTitle,
   GenerationTimeoutError,
   type ChatUsage,
 } from "@/lib/salesforce"
@@ -12,7 +13,7 @@ import {
   getSessionContext,
 } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
-import { MODELS, GENERATION_TIMEOUT_MS } from "@/config/models"
+import { MODELS, GENERATION_TIMEOUT_MS, TITLE_TIMEOUT_MS } from "@/config/models"
 import type { ChatMessage, ChatMessageWithModel, ChatRole } from "@/lib/types"
 
 // The Salesforce client uses Node APIs / env vars — force the Node runtime.
@@ -233,6 +234,18 @@ export async function POST(request: Request) {
     summarizedCount,
   })
 
+  // FR2: for a brand-new chat, generate its title CONCURRENTLY with the main
+  // reply (from the user's message alone), rather than chaining a second model
+  // call after it. Chaining two ≤28s calls could push the request past Heroku's
+  // 30s router timeout (H12) and lose the reply; running them in parallel keeps
+  // the total ≈ max(), and the short TITLE_TIMEOUT_MS bounds a slow title so it
+  // can't hold up a fast reply. Best-effort — resolves null on failure/timeout,
+  // and createSession falls back to the message-derived title.
+  const firstUserMessage = conversation[0]?.content ?? ""
+  const titlePromise: Promise<string | null> | null = activeSessionIdInput
+    ? null
+    : generateChatTitle(model, firstUserMessage, TITLE_TIMEOUT_MS)
+
   let content: string
   let usage: ChatUsage | null = null
   try {
@@ -316,11 +329,16 @@ export async function POST(request: Request) {
   let activeSessionId = activeSessionIdInput
   try {
     if (!activeSessionId) {
+      // The AI title was kicked off in parallel with the reply (see above);
+      // await whatever it produced. createSession falls back to a
+      // message-derived title when it's null.
+      const aiTitle = titlePromise ? await titlePromise : null
       activeSessionId = await createSession(
         sfUsername,
         model,
         conversation[0]?.content ?? content,
-        newChatProjectId
+        newChatProjectId,
+        aiTitle
       )
     }
     await appendConversation(activeSessionId, sfUsername, fullConversation, model)

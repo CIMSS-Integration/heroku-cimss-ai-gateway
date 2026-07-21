@@ -191,7 +191,8 @@ export async function createSession(
   sfUsername: string,
   model: string,
   firstUserMessage: string,
-  projectId?: string | null
+  projectId?: string | null,
+  title?: string | null
 ): Promise<string> {
   if (projectId) {
     // Any user may file a chat under a project they can see: their own, or a
@@ -207,11 +208,15 @@ export async function createSession(
     }
   }
 
+  // Prefer an explicit (e.g. AI-generated) title when given; otherwise derive
+  // one from the first user message. deriveTitle normalizes/truncates either.
+  const finalTitle = deriveTitle(title?.trim() ? title : firstUserMessage)
+
   const result = await pool.query(
     `insert into ai.chat_session (sf_username, model, title, project_id)
      values ($1, $2, $3, $4)
      returning id`,
-    [sfUsername, model, deriveTitle(firstUserMessage), projectId ?? null]
+    [sfUsername, model, finalTitle, projectId ?? null]
   )
   return result.rows[0].id as string
 }
@@ -251,6 +256,7 @@ export async function listProjects(
     chatCount: Number(row.chat_count),
     isPublic: row.is_public === true,
     isOwner: row.sf_username === sfUsername,
+    owner: row.sf_username as string,
   }))
 }
 
@@ -282,6 +288,7 @@ export async function createProject(
     chatCount: 0,
     isPublic: row.is_public === true,
     isOwner: true,
+    owner: sfUsername,
   }
 }
 
@@ -321,6 +328,7 @@ export async function getProject(
     chatCount: chats.length,
     isPublic: project.is_public === true,
     isOwner: project.sf_username === sfUsername,
+    owner: project.sf_username as string,
     chats,
   }
 }
@@ -340,28 +348,56 @@ export async function updateProject(
     fields.name !== undefined ? deriveProjectName(fields.name) : undefined
   if (fields.name !== undefined && !finalName) return null
 
-  const result = await pool.query(
-    `update ai.chat_project
-     set name = coalesce($3, name),
-         instructions = case when $4::boolean then $5 else instructions end,
-         is_public = case when $6::boolean then $7 else is_public end,
-         updated_at = now()
-     where id = $1 and sf_username = $2 and archived_at is null
-     returning name`,
-    [
-      projectId,
-      sfUsername,
-      finalName ?? null,
-      fields.instructions !== undefined,
-      fields.instructions !== undefined
-        ? (fields.instructions?.trim() || null)
-        : null,
-      fields.isPublic !== undefined,
-      fields.isPublic ?? false,
-    ]
-  )
-  const row = result.rows[0]
-  return row ? (row.name as string) : null
+  const client = await pool.connect()
+  try {
+    await client.query("begin")
+    const result = await client.query(
+      `update ai.chat_project
+       set name = coalesce($3, name),
+           instructions = case when $4::boolean then $5 else instructions end,
+           is_public = case when $6::boolean then $7 else is_public end,
+           updated_at = now()
+       where id = $1 and sf_username = $2 and archived_at is null
+       returning name`,
+      [
+        projectId,
+        sfUsername,
+        finalName ?? null,
+        fields.instructions !== undefined,
+        fields.instructions !== undefined
+          ? (fields.instructions?.trim() || null)
+          : null,
+        fields.isPublic !== undefined,
+        fields.isPublic ?? false,
+      ]
+    )
+    const row = result.rows[0]
+    if (!row) {
+      await client.query("rollback")
+      return null
+    }
+
+    // Making a project private: return every OTHER user's chats in it to their
+    // own unfiled lists, atomically. Otherwise those chats would stay filed
+    // under a project their owner can no longer see — stranded and unreachable
+    // (mirrors archiveProject's orphaning; the owner's own chats stay filed).
+    // Setting it to false when already private is a harmless no-op.
+    if (fields.isPublic === false) {
+      await client.query(
+        `update ai.chat_session set project_id = null
+         where project_id = $1 and sf_username <> $2`,
+        [projectId, sfUsername]
+      )
+    }
+
+    await client.query("commit")
+    return row.name as string
+  } catch (err) {
+    await client.query("rollback")
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 /**

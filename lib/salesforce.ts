@@ -214,6 +214,54 @@ export async function chatGenerateWithTimeout(
   }
 }
 
+const TITLE_WORD_CAP = 6
+
+/** Normalize a model-produced title: first line, strip wrapping quotes/markdown
+ *  and trailing punctuation, collapse whitespace, cap words and length. */
+function cleanTitle(raw: string): string {
+  let t = (raw.split("\n").find((l) => l.trim()) ?? "").trim()
+  // Strip surrounding quotes / markdown emphasis and any leading "Title:" label.
+  t = t.replace(/^\s*title\s*[:\-]\s*/i, "")
+  t = t.replace(/^["'`*_#\s]+/, "").replace(/["'`*_.\s]+$/, "")
+  t = t.replace(/\s+/g, " ").trim()
+  const words = t.split(" ")
+  if (words.length > TITLE_WORD_CAP) t = words.slice(0, TITLE_WORD_CAP).join(" ")
+  return t.slice(0, 80).trim()
+}
+
+/**
+ * Ask a model for a very short (4–5 word) chat title summarizing a transcript.
+ * Best-effort: returns the cleaned title, or null if the call fails/times out or
+ * comes back empty (callers fall back to a message-derived title). Uses the
+ * given model so the title matches the chat's model family.
+ */
+export async function generateChatTitle(
+  model: string,
+  transcript: string,
+  timeoutMs: number
+): Promise<string | null> {
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content:
+        "You write extremely short chat titles. Output ONLY a 4-5 word title " +
+        "that captures the conversation's main topic. No quotes, no surrounding " +
+        "punctuation, no trailing period, and no prefix like 'Title:'.",
+    },
+    {
+      role: "user",
+      content: `Conversation:\n\n${transcript}\n\n---\nTitle:`,
+    },
+  ]
+  try {
+    const { content } = await chatGenerateWithTimeout(model, messages, timeoutMs)
+    const cleaned = cleanTitle(content)
+    return cleaned || null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Pull the token-usage accounting out of the Models API response. The
  * chat-generations response nests it under generationDetails.parameters

@@ -55,6 +55,8 @@ export type ChatProjectSummary = {
   isPublic: boolean
   /** Whether the signed-in user created (and thus can manage) this project. */
   isOwner: boolean
+  /** Creator's Salesforce username — shown for attribution on shared projects. */
+  owner: string
 }
 
 /** A project plus the chats filed under it. */

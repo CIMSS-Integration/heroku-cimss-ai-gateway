@@ -87,6 +87,28 @@ async function readJson(res: Response): Promise<Record<string, unknown> | null> 
   }
 }
 
+/**
+ * fetch for MUTATING requests that retries once when the server couldn't
+ * resolve the caller's Salesforce identity (`503 { code: "identity_unverified"
+ * }`). That's the same intermittent Clerk propagation lag behind the login race
+ * (UAT #1), hitting a mutation mid-session (the "couldn't rename" bug) — a fresh
+ * request re-runs `currentUser()` server-side and almost always succeeds.
+ */
+async function fetchMutation(
+  input: string,
+  init?: RequestInit
+): Promise<Response> {
+  const res = await fetch(input, init)
+  if (res.status !== 503) return res
+  const data = (await res
+    .clone()
+    .json()
+    .catch(() => null)) as { code?: string } | null
+  if (data?.code !== "identity_unverified") return res
+  await new Promise((r) => setTimeout(r, 600))
+  return fetch(input, init)
+}
+
 function errorFor(
   res: Response,
   data: Record<string, unknown> | null,
@@ -493,7 +515,7 @@ export default function ChatPage() {
 
   async function handleMoveToProject(id: string, projectId: string | null) {
     try {
-      const res = await fetch(`/api/chat/sessions/${id}`, {
+      const res = await fetchMutation(`/api/chat/sessions/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId }),
@@ -523,23 +545,48 @@ export default function ChatPage() {
     setProjectChats((prev) => prev.map(retitle))
 
     try {
-      const res = await fetch(`/api/chat/sessions/${id}`, {
+      const res = await fetchMutation(`/api/chat/sessions/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: trimmed }),
       })
-      if (!res.ok) throw new Error()
       const data = await readJson(res)
+      // Surface the actual server error (status + message) rather than a generic
+      // one — needed to diagnose the "couldn't rename" reports (e.g. a 503
+      // `identity_unverified` points at the identity race, 403 at ownership).
+      if (!res.ok) throw new Error(errorFor(res, data, "Couldn't rename that chat"))
       // Reflect the authoritative stored title (server normalizes/truncates).
       const stored = (data?.title as string) ?? trimmed
       const store = (s: ChatSessionSummary) =>
         s.id === id ? { ...s, title: stored } : s
       setSessions((prev) => prev.map(store))
       setProjectChats((prev) => prev.map(store))
-    } catch {
+    } catch (err) {
       setSessions(previousSessions)
       setProjectChats(previousProjectChats)
-      setError("Couldn't rename that chat.")
+      setError(err instanceof Error ? err.message : "Couldn't rename that chat.")
+    }
+  }
+
+  // FR3: ask the server to read the whole chat and rename it with an
+  // AI-generated title (using the chat's last-used model). Returns a promise so
+  // the sidebar row can show a spinner while it runs.
+  async function handleAiRename(id: string) {
+    try {
+      const res = await fetchMutation(`/api/chat/sessions/${id}/retitle`, {
+        method: "POST",
+      })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(errorFor(res, data, "Couldn't rename that chat"))
+      const stored = (data?.title as string) ?? null
+      if (stored) {
+        const store = (s: ChatSessionSummary) =>
+          s.id === id ? { ...s, title: stored } : s
+        setSessions((prev) => prev.map(store))
+        setProjectChats((prev) => prev.map(store))
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't rename that chat.")
     }
   }
 
@@ -553,7 +600,7 @@ export default function ChatPage() {
     if (!ok) return
 
     try {
-      const res = await fetch(`/api/chat/sessions/${id}`, {
+      const res = await fetchMutation(`/api/chat/sessions/${id}`, {
         method: "DELETE",
       })
       if (!res.ok) throw new Error()
@@ -916,6 +963,8 @@ export default function ChatPage() {
                 activeTab={activeTab}
                 onTabChange={handleTabChange}
                 disabled={sidebarDisabled}
+                draftActive={!isResuming && sessionId === null}
+                draftProjectId={composerProjectId}
                 sessions={sessions}
                 activeSessionId={sessionId}
                 isLoadingSessions={isLoadingSessions}
@@ -923,6 +972,7 @@ export default function ChatPage() {
                 onNewChat={handleNewChat}
                 onDelete={handleDeleteSession}
                 onRename={handleRenameSession}
+                onAiRename={handleAiRename}
                 onMoveToProject={handleMoveToProject}
                 projects={projects}
                 isLoadingProjects={isLoadingProjects}

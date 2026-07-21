@@ -92,7 +92,21 @@ export async function PATCH(request: Request, { params }: RouteParams) {
   try {
     const sfUsername = await getSalesforceUsername()
     if (!sfUsername) {
-      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+      // Distinct from a genuine 404: the signed-in user's Salesforce link
+      // didn't resolve this request (the same intermittent race as UAT #1,
+      // hitting a mutation mid-session). Surfaced separately so it's not
+      // mistaken for "chat not found" and so it's greppable in logs (UAT rename
+      // bug). 503 signals "retry", not "gone".
+      console.warn(
+        "[/api/chat/sessions/[id]] PATCH: Salesforce username unresolved for signed-in user"
+      )
+      return NextResponse.json(
+        {
+          error: "We couldn't verify your Salesforce account. Please try again.",
+          code: "identity_unverified",
+        },
+        { status: 503 }
+      )
     }
 
     // Rename / move are creator-only. A chat visible only because it's in a
@@ -153,7 +167,16 @@ export async function DELETE(_request: Request, { params }: RouteParams) {
   try {
     const sfUsername = await getSalesforceUsername()
     if (!sfUsername) {
-      return NextResponse.json({ error: "Chat not found" }, { status: 404 })
+      console.warn(
+        "[/api/chat/sessions/[id]] DELETE: Salesforce username unresolved for signed-in user"
+      )
+      return NextResponse.json(
+        {
+          error: "We couldn't verify your Salesforce account. Please try again.",
+          code: "identity_unverified",
+        },
+        { status: 503 }
+      )
     }
     // Deleting is creator-only (403 if visible via public sharing but not yours).
     const access = await getSessionAccess(id, sfUsername)

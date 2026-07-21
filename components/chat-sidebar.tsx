@@ -7,10 +7,12 @@ import {
   Folder,
   FolderInput,
   Globe,
+  Loader2,
   Lock,
   Pencil,
   PenSquare,
   Share2,
+  Sparkles,
   Trash2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -23,6 +25,12 @@ type ChatSidebarProps = {
   onTabChange: (tab: SidebarTab) => void
   disabled: boolean
 
+  // A brand-new (unsaved) chat is open — show a "New chat" draft row so it's
+  // visible in the sidebar before the first message is sent (UAT #2).
+  draftActive: boolean
+  /** The project the draft belongs to (from "New chat in project"), or null. */
+  draftProjectId: string | null
+
   // Chats tab (unfiled chats)
   sessions: ChatSessionSummary[]
   activeSessionId: string | null
@@ -31,6 +39,7 @@ type ChatSidebarProps = {
   onNewChat: () => void
   onDelete: (id: string) => void
   onRename: (id: string, title: string) => void
+  onAiRename: (id: string) => Promise<void>
   onMoveToProject: (id: string, projectId: string | null) => void
 
   // Projects tab
@@ -127,6 +136,7 @@ function RowAction({
       role="button"
       tabIndex={0}
       aria-label={label}
+      title={label}
       onClick={(e) => {
         e.stopPropagation()
         onActivate()
@@ -156,6 +166,7 @@ type SessionRowProps = {
   onSelect: (id: string) => void
   onDelete: (id: string) => void
   onRename: (id: string, title: string) => void
+  onAiRename: (id: string) => Promise<void>
   onMoveToProject: (id: string, projectId: string | null) => void
 }
 
@@ -167,10 +178,12 @@ function SessionRow({
   onSelect,
   onDelete,
   onRename,
+  onAiRename,
   onMoveToProject,
 }: SessionRowProps) {
   const [editing, setEditing] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [aiRenaming, setAiRenaming] = useState(false)
   const rowRef = useRef<HTMLLIElement>(null)
 
   // Close the move-menu on any outside interaction.
@@ -248,6 +261,25 @@ function SessionRow({
               className="hover:text-destructive"
             >
               <Trash2 className="h-3.5 w-3.5" />
+            </RowAction>
+            <RowAction
+              label="Rename with AI — reads the chat and suggests a title"
+              onActivate={async () => {
+                if (disabled || aiRenaming) return
+                setAiRenaming(true)
+                try {
+                  await onAiRename(session.id)
+                } finally {
+                  setAiRenaming(false)
+                }
+              }}
+              className={cn("hover:text-primary", aiRenaming && "opacity-100")}
+            >
+              {aiRenaming ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
             </RowAction>
           </>
         ) : (
@@ -395,6 +427,29 @@ function ProjectRow({
   )
 }
 
+/**
+ * A non-interactive, highlighted row shown while a brand-new chat is open but
+ * not yet saved — so it's obvious in the sidebar that the new chat is already
+ * active and waiting for a first message, rather than nothing appearing until
+ * the user types (UAT #2).
+ */
+function DraftRow() {
+  return (
+    <li>
+      <div
+        aria-current="true"
+        className="bg-sidebar-accent text-sidebar-accent-foreground flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm"
+      >
+        <PenSquare className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">New chat</span>
+        <span className="text-muted-foreground shrink-0 text-[10px] font-medium tracking-wide uppercase">
+          Draft
+        </span>
+      </div>
+    </li>
+  )
+}
+
 function TabButton({
   active,
   onClick,
@@ -425,6 +480,8 @@ export function ChatSidebar(props: ChatSidebarProps) {
     activeTab,
     onTabChange,
     disabled,
+    draftActive,
+    draftProjectId,
     sessions,
     activeSessionId,
     isLoadingSessions,
@@ -432,6 +489,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
     onNewChat,
     onDelete,
     onRename,
+    onAiRename,
     onMoveToProject,
     projects,
     isLoadingProjects,
@@ -494,14 +552,21 @@ export function ChatSidebar(props: ChatSidebarProps) {
           </div>
 
           <div className="flex-1 overflow-y-auto px-2 py-1">
+            {draftActive && !draftProjectId && (
+              <ul className="mb-1 space-y-0.5">
+                <DraftRow />
+              </ul>
+            )}
             {isLoadingSessions ? (
               <p className="text-muted-foreground px-3 py-4 text-xs">
                 Loading chats…
               </p>
             ) : sessions.length === 0 ? (
-              <p className="text-muted-foreground px-3 py-4 text-xs">
-                No chats yet
-              </p>
+              draftActive && !draftProjectId ? null : (
+                <p className="text-muted-foreground px-3 py-4 text-xs">
+                  No chats yet
+                </p>
+              )
             ) : (
               <>
                 <p className="text-muted-foreground px-3 pt-2 pb-1 text-xs font-medium">
@@ -518,6 +583,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
                       onSelect={onSelect}
                       onDelete={onDelete}
                       onRename={onRename}
+                      onAiRename={onAiRename}
                       onMoveToProject={onMoveToProject}
                     />
                   ))}
@@ -553,7 +619,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
             <p className="text-muted-foreground px-4 pb-1 text-[11px]">
               {openProject.isOwner
                 ? "Shared with everyone — others can view your chats here."
-                : "Public project — you can read all chats and add your own."}
+                : `This project is owned by ${openProject.owner}. You can read all chats, add your own, but to edit any items contact the original author.`}
             </p>
           )}
           <div className="px-2 pb-2">
@@ -568,14 +634,21 @@ export function ChatSidebar(props: ChatSidebarProps) {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto px-2 py-1">
+            {draftActive && draftProjectId === openProject.id && (
+              <ul className="mb-1 space-y-0.5">
+                <DraftRow />
+              </ul>
+            )}
             {isLoadingProjectChats ? (
               <p className="text-muted-foreground px-3 py-4 text-xs">
                 Loading chats…
               </p>
             ) : projectChats.length === 0 ? (
-              <p className="text-muted-foreground px-3 py-4 text-xs">
-                No chats in this project yet
-              </p>
+              draftActive && draftProjectId === openProject.id ? null : (
+                <p className="text-muted-foreground px-3 py-4 text-xs">
+                  No chats in this project yet
+                </p>
+              )
             ) : (
               <ul className="space-y-0.5">
                 {projectChats.map((session) => (
@@ -588,6 +661,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
                     onSelect={onSelect}
                     onDelete={onDelete}
                     onRename={onRename}
+                    onAiRename={onAiRename}
                     onMoveToProject={onMoveToProject}
                   />
                 ))}

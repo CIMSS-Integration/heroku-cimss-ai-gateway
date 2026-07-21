@@ -101,6 +101,14 @@ export const DEFAULT_MODEL = MODELS[0]?.id ?? ""
 export const GENERATION_TIMEOUT_MS = 28_000
 
 /**
+ * Time budget for an auto-title generation (first-message titling and AI
+ * rename). Shorter than a full reply: titles are a few tokens, and for the
+ * first-message case the title call runs concurrently with the main reply, so a
+ * runaway title must not extend the overall request toward Heroku's H12.
+ */
+export const TITLE_TIMEOUT_MS = 12_000
+
+/**
  * Optional system prompt prepended to every conversation. Set to "" to disable.
  * The Models API accepts a message with role "system".
  */
