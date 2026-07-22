@@ -256,33 +256,42 @@ export default function ChatPage() {
     let cancelled = false
 
     async function init() {
-      // The Salesforce link can lag right after OAuth: Clerk's session is valid
-      // (auth() sees the user) but the linked external account hasn't propagated
-      // to the Backend API yet, so the first read misses and the user is wrongly
-      // shown the "no linked account" block screen (UAT #1). Retry a few times
-      // before concluding there's none — each attempt is a fresh request, so
-      // currentUser() is re-queried (retrying within one request wouldn't help,
-      // as Clerk memoizes it per request). A 401 (session not ready yet) is
-      // treated the same as a miss and retried.
+      // Right after OAuth — especially a first-ever login — the Clerk session
+      // isn't recognized server-side for a second or two: /api/identity returns
+      // 401 until the session hydrates, then 200. (Confirmed in prod logs: a
+      // successful login shows 401, 401, then 200.) New users hydrate slower and
+      // were exhausting the old 3-try window, landing on the "no Salesforce
+      // account" block screen (UAT #1). So we retry across a ~9s window on 401 /
+      // network / 5xx — but STOP on any 200: a 200 with no username means the
+      // session IS ready and there's genuinely no linked account, so we must not
+      // make that user wait out the whole window.
+      const backoffs = [400, 700, 1100, 1600, 2200, 3000]
       let identity: { sfUsername: string | null; linkedProviders: string[] } = {
         sfUsername: null,
         linkedProviders: [],
       }
-      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+      for (let attempt = 0; !cancelled; attempt++) {
+        let sessionReady = false
         try {
           const res = await fetch("/api/identity")
-          const data = await readJson(res)
-          if (res.ok && data) {
+          if (res.ok) {
+            const data = await readJson(res)
             identity = {
-              sfUsername: (data.sfUsername as string | null) ?? null,
-              linkedProviders: (data.linkedProviders as string[]) ?? [],
+              sfUsername: (data?.sfUsername as string | null) ?? null,
+              linkedProviders: (data?.linkedProviders as string[]) ?? [],
             }
+            sessionReady = true
+          } else if (res.status !== 401 && res.status < 500) {
+            // A definite 4xx (not "session not ready") — don't spin.
+            sessionReady = true
           }
+          // 401 or 5xx → session not ready / transient → retry.
         } catch {
-          // Network error — treat as a miss and retry.
+          // Network error — retry.
         }
-        if (identity.sfUsername) break
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 700))
+        if (sessionReady || identity.sfUsername) break
+        if (attempt >= backoffs.length) break
+        await new Promise((r) => setTimeout(r, backoffs[attempt]))
       }
       if (cancelled) return
 

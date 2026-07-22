@@ -1,5 +1,5 @@
 import "server-only"
-import { currentUser } from "@clerk/nextjs/server"
+import { auth, clerkClient, currentUser } from "@clerk/nextjs/server"
 
 export type SalesforceIdentity = {
   /** The linked Salesforce username, or null if none is linked. */
@@ -7,6 +7,15 @@ export type SalesforceIdentity = {
   /** All linked external-account provider slugs (for diagnostics / the blocked screen). */
   linkedProviders: string[]
 }
+
+/** The shape we read off a Clerk user's external accounts (currentUser() and the
+ *  Backend API expose the same fields). */
+type ExternalAccountLike = {
+  provider?: string | null
+  username?: string | null
+  emailAddress?: string | null
+}
+type UserLike = { externalAccounts?: ExternalAccountLike[] } | null | undefined
 
 /**
  * True if a Clerk external-account provider slug is this app's Salesforce SSO
@@ -22,35 +31,64 @@ function isSalesforceProvider(provider: string | null | undefined): boolean {
   return p.includes("salesforce") || /(?:^|_)sf(?:_|$)/.test(p)
 }
 
-/**
- * Resolves the signed-in user's Salesforce identity from their linked Clerk
- * external accounts.
- */
-export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
-  const user = await currentUser()
+/** Extract the Salesforce identity from a Clerk user's external accounts.
+ *  Username falls back to the account's email if the connection didn't populate
+ *  a username (both are the user's email on the prod SF connection). */
+function fromUser(user: UserLike): SalesforceIdentity {
   const accounts = user?.externalAccounts ?? []
   const linkedProviders = accounts
     .map((a) => a.provider)
     .filter((p): p is string => Boolean(p))
   const sfAccount = accounts.find((a) => isSalesforceProvider(a.provider))
-  const sfUsername = sfAccount?.username ?? null
-
-  // Diagnostics for UAT #1 (intermittent "no linked account" for users who
-  // DO have one). A miss right after OAuth is usually Clerk Backend-API
-  // propagation lag; logging which sub-case we hit confirms it in prod:
-  //   - hasUser=false     → currentUser() came back null (session not ready)
-  //   - accountCount=0    → user present but external accounts not propagated
-  //   - matchedProvider set but usernameNull=true → account linked, username lag
-  if (!sfUsername) {
-    console.warn("[identity] no Salesforce username resolved", {
-      hasUser: Boolean(user),
-      accountCount: accounts.length,
-      providers: linkedProviders,
-      matchedProvider: sfAccount?.provider ?? null,
-      usernameNull: sfAccount ? sfAccount.username == null : null,
-    })
-  }
+  const sfUsername = sfAccount
+    ? sfAccount.username || sfAccount.emailAddress || null
+    : null
   return { sfUsername, linkedProviders }
+}
+
+/**
+ * Resolves the signed-in user's Salesforce identity from their linked Clerk
+ * external accounts.
+ *
+ * Two-stage lookup: the request-scoped `currentUser()` is the fast path, but it
+ * was observed returning a user with NO external accounts for some prod
+ * sessions — new users hit the "no Salesforce account" screen even though the
+ * Backend API clearly has their linked SF account. So when the fast path finds
+ * no SF username we re-fetch the user authoritatively via the Backend API
+ * (`clerkClient().users.getUser`) before giving up. The Backend fetch only runs
+ * on the miss path, so normal logins pay nothing extra.
+ */
+export async function getSalesforceIdentity(): Promise<SalesforceIdentity> {
+  const fast = fromUser((await currentUser()) as UserLike)
+  if (fast.sfUsername) return fast
+
+  let authoritative: SalesforceIdentity | null = null
+  try {
+    const { userId } = await auth()
+    if (userId) {
+      const client = await clerkClient()
+      const full = (await client.users.getUser(userId)) as UserLike
+      authoritative = fromUser(full)
+      if (authoritative.sfUsername) return authoritative
+    }
+  } catch (err) {
+    console.error(
+      "[identity] Backend getUser fallback failed",
+      err instanceof Error ? err.message : err
+    )
+  }
+
+  // Still nothing — surface the richer provider list we saw for diagnostics.
+  const best =
+    authoritative && authoritative.linkedProviders.length >
+      fast.linkedProviders.length
+      ? authoritative
+      : fast
+  console.warn("[identity] no Salesforce username resolved", {
+    fastProviders: fast.linkedProviders,
+    apiProviders: authoritative?.linkedProviders ?? null,
+  })
+  return best
 }
 
 /** Convenience wrapper: just the Salesforce username (null if not linked). */
