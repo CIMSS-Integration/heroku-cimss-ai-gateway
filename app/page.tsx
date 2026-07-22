@@ -1,10 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import Image from "next/image"
 import { ArrowUp, PanelLeft } from "lucide-react"
 import { Sparkles } from "lucide-react"
-import { Show, SignIn, UserButton } from "@clerk/nextjs"
+import { Show, SignIn, UserButton, useAuth } from "@clerk/nextjs"
 
 import {
   ChatContainerContent,
@@ -122,6 +122,10 @@ function errorFor(
 }
 
 export default function ChatPage() {
+  // Clerk client-side auth state — used to bootstrap only once the session is
+  // actually established, so /api/identity doesn't race ahead of it.
+  const { isLoaded, isSignedIn, getToken } = useAuth()
+  const bootstrappedRef = useRef(false)
   const confirm = useConfirm()
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [model, setModel] = useState(DEFAULT_MODEL)
@@ -250,22 +254,29 @@ export default function ChatPage() {
     }
   }
 
-  // On load: verify a Salesforce account is linked, then fetch the sidebar list
-  // and resume the most recent chat.
+  // Bootstrap once Clerk confirms the session is established. Gating on
+  // `isSignedIn` (rather than firing on mount) is the real latency win: it
+  // stops /api/identity from racing ahead of the session, so the FIRST call
+  // usually returns 200 instead of a run of 401s (UAT #1). We also attach a
+  // fresh Clerk session token so the server can validate immediately even if
+  // the cookie is still propagating. The backoff retry stays only as a safety
+  // net for residual lag; it STOPS on any 200 (a 200 with no username = session
+  // ready, genuinely no linked account — don't make that user wait).
   useEffect(() => {
+    if (!isLoaded) return // wait for Clerk to load client-side
+    if (!isSignedIn) {
+      // Signed out — the <Show when="signed-out"> branch shows the SignIn UI.
+      // Allow a later sign-in to bootstrap.
+      bootstrappedRef.current = false
+      return
+    }
+    if (bootstrappedRef.current) return
+    bootstrappedRef.current = true
+
     let cancelled = false
 
     async function init() {
-      // Right after OAuth — especially a first-ever login — the Clerk session
-      // isn't recognized server-side for a second or two: /api/identity returns
-      // 401 until the session hydrates, then 200. (Confirmed in prod logs: a
-      // successful login shows 401, 401, then 200.) New users hydrate slower and
-      // were exhausting the old 3-try window, landing on the "no Salesforce
-      // account" block screen (UAT #1). So we retry across a ~9s window on 401 /
-      // network / 5xx — but STOP on any 200: a 200 with no username means the
-      // session IS ready and there's genuinely no linked account, so we must not
-      // make that user wait out the whole window.
-      const backoffs = [400, 700, 1100, 1600, 2200, 3000]
+      const backoffs = [300, 600, 1000, 1500, 2200, 3000, 4000]
       let identity: { sfUsername: string | null; linkedProviders: string[] } = {
         sfUsername: null,
         linkedProviders: [],
@@ -273,7 +284,18 @@ export default function ChatPage() {
       for (let attempt = 0; !cancelled; attempt++) {
         let sessionReady = false
         try {
-          const res = await fetch("/api/identity")
+          let token: string | null = null
+          try {
+            token = await getToken()
+          } catch {
+            // getToken can transiently fail before the session settles.
+          }
+          const res = await fetch(
+            "/api/identity",
+            token
+              ? { headers: { Authorization: `Bearer ${token}` } }
+              : undefined
+          )
           if (res.ok) {
             const data = await readJson(res)
             identity = {
@@ -327,7 +349,8 @@ export default function ChatPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, isSignedIn])
 
   // Keep the Projects tab fresh without a full page reload: public projects
   // (and chats other users add to them) are pulled once on load, so a project
