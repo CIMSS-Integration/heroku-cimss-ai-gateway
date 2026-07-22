@@ -130,7 +130,10 @@ export async function getSessionAccess(
      left join ai.chat_project p
        on p.id = s.project_id and p.archived_at is null
      where s.id = $1 and s.archived_at is null`,
-    [sessionId, sfUsername]
+    // Only $1 is referenced — ownership is compared in JS below. Passing a
+    // second value here makes Postgres reject the bind (param-count mismatch),
+    // which 500'd every DELETE/PATCH that goes through this guard.
+    [sessionId]
   )
   const row = result.rows[0]
   if (!row) return null
