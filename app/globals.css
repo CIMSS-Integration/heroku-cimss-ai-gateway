@@ -141,3 +141,25 @@
     @apply font-sans;
   }
 }
+
+/* Loader "typing" dots (components/ui/loader.tsx → TypingLoader, used for the
+   resume/assistant/identity indicators). Registered via @theme so Tailwind
+   emits both the `animate-typing` utility AND its keyframes consistently in
+   `next dev` and `next build` — a bare top-level @keyframes referenced only by
+   an arbitrary `animate-[...]` utility wasn't reliably picked up by the dev
+   (Turbopack) CSS pipeline. Per-dot stagger comes from an inline
+   animation-delay in the component. */
+@theme {
+  --animate-typing: typing 1s infinite;
+  @keyframes typing {
+    0%,
+    100% {
+      opacity: 0.25;
+      transform: translateY(0);
+    }
+    40% {
+      opacity: 1;
+      transform: translateY(-2px);
+    }
+  }
+}
