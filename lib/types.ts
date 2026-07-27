@@ -59,6 +59,21 @@ export type ChatProjectSummary = {
   owner: string
 }
 
+/**
+ * One row of the org-wide usage table: a user and their totals. Counts only —
+ * no titles or message content — because every signed-in user can see this.
+ */
+export type UserUsageStats = {
+  /** Salesforce username of the chat owner (the identity chats are keyed by). */
+  sfUsername: string
+  /** Chats the user created, archived ones included. */
+  chats: number
+  /** Messages across those chats (user + assistant turns). */
+  messages: number
+  /** ISO timestamp of their most recently active chat; null if they have none. */
+  lastActive: string | null
+}
+
 /** A project plus the chats filed under it. */
 export type ChatProjectWithChats = ChatProjectSummary & {
   /** Project-wide instructions prepended to the system prompt for its chats. */

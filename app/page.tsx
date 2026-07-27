@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import Image from "next/image"
-import { ArrowUp, PanelLeft } from "lucide-react"
+import { ArrowUp, BarChart3, PanelLeft } from "lucide-react"
 import { Sparkles } from "lucide-react"
 import { Show, SignIn, UserButton, useAuth } from "@clerk/nextjs"
 
@@ -26,6 +26,7 @@ import {
   type NewProjectFields,
 } from "@/components/ui/new-project-dialog"
 import { ChatSidebar, type SidebarTab } from "@/components/chat-sidebar"
+import { UsageStats } from "@/components/usage-stats"
 import {
   MODELS,
   DEFAULT_MODEL,
@@ -1044,7 +1045,29 @@ export default function ChatPage() {
                     </span>
                   </h1>
                 </div>
-                <UserButton />
+                {/* "Stats" sits in the dropdown between Manage account and Sign
+                    out. Listing the two built-in actions by name is how Clerk
+                    lets you position a custom item among them — omit them and
+                    they'd both fall below it. `open` points at the custom page
+                    registered below, which is where the table actually lives. */}
+                <UserButton>
+                  <UserButton.MenuItems>
+                    <UserButton.Action label="manageAccount" />
+                    <UserButton.Action
+                      label="Stats"
+                      labelIcon={<BarChart3 className="h-4 w-4" />}
+                      open="stats"
+                    />
+                    <UserButton.Action label="signOut" />
+                  </UserButton.MenuItems>
+                  <UserButton.UserProfilePage
+                    label="Stats"
+                    url="stats"
+                    labelIcon={<BarChart3 className="h-4 w-4" />}
+                  >
+                    <UsageStats viewer={sfUsername} />
+                  </UserButton.UserProfilePage>
+                </UserButton>
               </header>
 
               {showGreeting ? (

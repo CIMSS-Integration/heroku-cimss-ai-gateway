@@ -6,9 +6,15 @@ import type {
   ChatProjectWithChats,
   ChatRole,
   ChatSessionSummary,
+  UserUsageStats,
 } from "./types"
 
-export type { ChatSessionSummary, ChatProjectSummary, ChatProjectWithChats }
+export type {
+  ChatSessionSummary,
+  ChatProjectSummary,
+  ChatProjectWithChats,
+  UserUsageStats,
+}
 
 const PROJECT_NAME_MAX_LENGTH = 80
 
@@ -700,4 +706,42 @@ export async function appendConversation(
   } finally {
     client.release()
   }
+}
+
+/**
+ * Org-wide usage: one row per user, most recently active first. Every signed-in
+ * user can see this (product decision), so it is deliberately the query that crosses
+ * the per-user boundary every other query enforces — and it therefore returns
+ * counts only, never titles or message content.
+ *
+ * Messages are attributed to the chat's owner: only a chat's creator can write
+ * to it, so `chat_session.sf_username` is the author of all its messages (see
+ * "Identity" in docs/ARCHITECTURE.md — this is why `chat_message` has no author
+ * column). No `role` filter is needed either: `/api/chat` strips system
+ * messages before persisting, so only user/assistant turns are ever stored.
+ *
+ * Archived chats are **included** — deletion here is a soft delete, and these
+ * are lifetime usage totals, so a chat the user later archived still counts as
+ * activity. This means the numbers can exceed what that user sees in their own
+ * sidebar, and every user who has ever started a chat appears in the table.
+ */
+export async function getUsageStats(): Promise<UserUsageStats[]> {
+  const result = await pool.query(
+    `select s.sf_username,
+            count(distinct s.id) as chats,
+            count(m.id) as messages,
+            max(s.updated_at) as last_active
+     from ai.chat_session s
+     left join ai.chat_message m on m.session_id = s.id
+     group by s.sf_username
+     order by max(s.updated_at) desc, count(m.id) desc, s.sf_username asc`
+  )
+  // pg returns bigint counts as strings — coerce so the client can do arithmetic.
+  return result.rows.map((row) => ({
+    sfUsername: row.sf_username as string,
+    chats: Number(row.chats),
+    messages: Number(row.messages),
+    lastActive:
+      row.last_active instanceof Date ? row.last_active.toISOString() : null,
+  }))
 }
