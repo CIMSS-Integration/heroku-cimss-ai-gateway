@@ -393,6 +393,10 @@ export default function ChatPage() {
     setMessages([])
     setInput("")
     setError(null)
+    // Back to DEFAULT_MODEL: `model` still holds whatever the last opened chat
+    // was saved with (loadSession sets it) or the picker was left on, and a new
+    // chat shouldn't inherit that.
+    setModel(DEFAULT_MODEL)
     setComposerProjectId(null)
     setActiveChatReadOnly(false)
     resetContextState()
@@ -430,6 +434,7 @@ export default function ChatPage() {
     setMessages([])
     setInput("")
     setError(null)
+    setModel(DEFAULT_MODEL)
     // First send of this chat files it under the project. Even in a public
     // project this is the user's own new chat, so it's writable.
     setComposerProjectId(projectId)
