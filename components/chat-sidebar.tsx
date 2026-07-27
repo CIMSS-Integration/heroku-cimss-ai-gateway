@@ -25,7 +25,7 @@ type ChatSidebarProps = {
   onTabChange: (tab: SidebarTab) => void
   disabled: boolean
 
-  // A brand-new (unsaved) chat is open — show a "New chat" draft row so it's
+  // A brand-new (unsaved) chat is open — show a "Draft chat" row so it's
   // visible in the sidebar before the first message is sent (UAT #2).
   draftActive: boolean
   /** The project the draft belongs to (from "New chat in project"), or null. */
@@ -237,7 +237,9 @@ function SessionRow({
             if (!disabled && canManage) setEditing(true)
           }}
         >
-          {session.title || "New chat"}
+          {/* Saved but untitled (auto-titling failed) — anything but "New chat",
+              which reads as the button of that name. */}
+          {session.title || "Untitled chat"}
         </span>
         {canManage ? (
           <>
@@ -432,19 +434,21 @@ function ProjectRow({
  * not yet saved — so it's obvious in the sidebar that the new chat is already
  * active and waiting for a first message, rather than nothing appearing until
  * the user types (UAT #2).
+ *
+ * It sits directly under the "New chat" button, so it deliberately shares
+ * NEITHER that button's label nor its pen icon: users read a second "New chat"
+ * with the same icon as a duplicate button and clicked it (UAT). Its label
+ * alone says "Draft chat" — no icon, no badge, like a saved chat row — until
+ * the first message lands and the auto-title replaces it with a titled row.
  */
 function DraftRow() {
   return (
     <li>
       <div
         aria-current="true"
-        className="bg-sidebar-accent text-sidebar-accent-foreground flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm"
+        className="bg-sidebar-accent text-sidebar-accent-foreground flex w-full items-center rounded-lg px-3 py-2 text-sm"
       >
-        <PenSquare className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">New chat</span>
-        <span className="text-muted-foreground shrink-0 text-[10px] font-medium tracking-wide uppercase">
-          Draft
-        </span>
+        <span className="min-w-0 flex-1 truncate">Draft chat</span>
       </div>
     </li>
   )

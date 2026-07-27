@@ -1,7 +1,13 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { Loader2, RefreshCw } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import {
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
+  Loader2,
+  RefreshCw,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { UserUsageStats } from "@/lib/types"
 
@@ -20,10 +26,19 @@ function relativeAge(iso: string | null): string {
   return new Date(iso).toLocaleDateString()
 }
 
-/** The Salesforce username is an email — show the local part, full value on hover. */
-function shortName(sfUsername: string): string {
+/**
+ * Turn a Salesforce username into a readable name: drop the domain, split the
+ * local part on its separators and capitalize each word — "amit.shah@x.com" →
+ * "Amit Shah". The full username stays available on hover.
+ */
+function displayName(sfUsername: string): string {
   const at = sfUsername.indexOf("@")
-  return at > 0 ? sfUsername.slice(0, at) : sfUsername
+  const local = at > 0 ? sfUsername.slice(0, at) : sfUsername
+  const words = local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+  return words.length > 0 ? words.join(" ") : sfUsername
 }
 
 async function fetchStats(): Promise<UserUsageStats[]> {
@@ -39,6 +54,56 @@ function messageFor(err: unknown): string {
   return err instanceof Error ? err.message : "Couldn't load stats."
 }
 
+type SortKey = "user" | "chats" | "messages" | "lastActive"
+type SortDir = "asc" | "desc"
+
+/** The table's columns, in render order. `defaultDir` is the direction a column
+ *  sorts in when you first click it — busiest/most recent first for the numeric
+ *  and date columns, A–Z for names. */
+const COLUMNS: {
+  key: SortKey
+  label: string
+  align: "left" | "right"
+  defaultDir: SortDir
+}[] = [
+  { key: "user", label: "User", align: "left", defaultDir: "asc" },
+  { key: "chats", label: "Chats", align: "right", defaultDir: "desc" },
+  { key: "messages", label: "Messages", align: "right", defaultDir: "desc" },
+  {
+    key: "lastActive",
+    label: "Last active",
+    align: "right",
+    defaultDir: "desc",
+  },
+]
+
+/** Sortable value for `lastActive`. Users who've never been active sort as the
+ *  oldest (0) rather than dropping out — real timestamps are all positive. */
+function activeTime(iso: string | null): number {
+  if (!iso) return 0
+  const then = new Date(iso).getTime()
+  return Number.isNaN(then) ? 0 : then
+}
+
+/** Ascending comparison for one column; the caller flips it for descending. */
+function compareBy(
+  key: SortKey,
+  a: UserUsageStats,
+  b: UserUsageStats
+): number {
+  switch (key) {
+    case "user":
+      // Sort on what's displayed, not the raw login.
+      return displayName(a.sfUsername).localeCompare(displayName(b.sfUsername))
+    case "chats":
+      return a.chats - b.chats
+    case "messages":
+      return a.messages - b.messages
+    case "lastActive":
+      return activeTime(a.lastActive) - activeTime(b.lastActive)
+  }
+}
+
 /**
  * Org-wide usage table — chats and messages per user — mounted as the "Stats"
  * custom page of Clerk's `<UserButton />` account modal. Visible to every
@@ -47,11 +112,19 @@ function messageFor(err: unknown): string {
  * Clerk renders custom pages in a fairly narrow panel, so the layout is a
  * compact 4-column table that scrolls rather than a wide dashboard. `viewer` is
  * the signed-in user's Salesforce username, used only to highlight their row.
+ *
+ * Every column sorts (click the header; click again to reverse), starting on
+ * messages, busiest first. Sorting is client-side over the full result set —
+ * the response isn't paginated, so there's nothing to re-fetch.
  */
 export function UsageStats({ viewer }: { viewer: string | null }) {
   const [stats, setStats] = useState<UserUsageStats[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
+    key: "messages",
+    dir: "desc",
+  })
 
   // Initial load. State starts out "loading", so this path never sets state
   // synchronously during the effect — it only lands in the promise callbacks,
@@ -85,6 +158,24 @@ export function UsageStats({ viewer }: { viewer: string | null }) {
       setIsLoading(false)
     }
   }
+
+  /** Clicking the active column reverses it; a new column starts at its own
+   *  natural direction. */
+  function toggleSort(column: (typeof COLUMNS)[number]) {
+    setSort((current) =>
+      current.key === column.key
+        ? { key: column.key, dir: current.dir === "asc" ? "desc" : "asc" }
+        : { key: column.key, dir: column.defaultDir }
+    )
+  }
+
+  // Sorting a copy keeps `stats` in server order; JS sort is stable, so ties
+  // fall back to that order (most recently active first).
+  const sortedStats = useMemo(() => {
+    if (!stats) return null
+    const direction = sort.dir === "asc" ? 1 : -1
+    return [...stats].sort((a, b) => direction * compareBy(sort.key, a, b))
+  }, [stats, sort])
 
   const totalChats = stats?.reduce((sum, row) => sum + row.chats, 0) ?? 0
   const totalMessages = stats?.reduce((sum, row) => sum + row.messages, 0) ?? 0
@@ -145,14 +236,51 @@ export function UsageStats({ viewer }: { viewer: string | null }) {
           <table className="w-full border-separate border-spacing-0 text-sm">
             <thead className="text-muted-foreground">
               <tr className="[&>th]:bg-muted [&>th]:border-border [&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:border-b [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
-                <th className="text-left">User</th>
-                <th className="text-right">Chats</th>
-                <th className="text-right">Messages</th>
-                <th className="text-right">Last active</th>
+                {COLUMNS.map((column) => {
+                  const isActive = sort.key === column.key
+                  const Arrow = !isActive
+                    ? ChevronsUpDown
+                    : sort.dir === "asc"
+                      ? ChevronUp
+                      : ChevronDown
+                  return (
+                    <th
+                      key={column.key}
+                      aria-sort={
+                        isActive
+                          ? sort.dir === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleSort(column)}
+                        className={cn(
+                          "hover:text-foreground flex w-full items-center gap-1 whitespace-nowrap",
+                          column.align === "right"
+                            ? "justify-end"
+                            : "justify-start",
+                          isActive && "text-foreground"
+                        )}
+                      >
+                        {column.label}
+                        <Arrow
+                          className={cn(
+                            "h-3 w-3 shrink-0",
+                            !isActive && "opacity-40"
+                          )}
+                          aria-hidden
+                        />
+                      </button>
+                    </th>
+                  )
+                })}
               </tr>
             </thead>
             <tbody>
-              {stats.map((row, index) => (
+              {(sortedStats ?? stats).map((row, index) => (
                 <tr
                   key={row.sfUsername}
                   className={cn(
@@ -165,7 +293,7 @@ export function UsageStats({ viewer }: { viewer: string | null }) {
                     className="max-w-[10rem] truncate text-left"
                     title={row.sfUsername}
                   >
-                    {shortName(row.sfUsername)}
+                    {displayName(row.sfUsername)}
                     {row.sfUsername === viewer && (
                       <span className="text-muted-foreground ml-1 text-xs font-normal">
                         (you)

@@ -30,15 +30,15 @@ export type ModelConfig = {
 
 export const MODELS: ModelConfig[] = [
   {
-    id: "sfdc_ai__DefaultBedrockAnthropicClaude46Sonnet",
-    label: "Claude Sonnet 4.6 (Bedrock)",
-    description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
-    contextWindow: 200_000,
-  },
-  {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
     label: "Claude Opus 4.8 (Bedrock)",
     description: "Anthropic Claude Opus, served via Amazon Bedrock",
+    contextWindow: 200_000,
+  },
+  {
+    id: "sfdc_ai__DefaultBedrockAnthropicClaude46Sonnet",
+    label: "Claude Sonnet 4.6 (Bedrock)",
+    description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
     contextWindow: 200_000,
   },
   {
@@ -89,8 +89,17 @@ export const CONTEXT_WARN_RATIO = 0.85
  */
 export const KEEP_RECENT_MESSAGES = 4
 
-/** The model selected by default when the app loads. */
-export const DEFAULT_MODEL = MODELS[0]?.id ?? ""
+/**
+ * The model selected by default when the app loads. Pinned by id, not by list
+ * position, so reordering the picker above doesn't silently change the default
+ * — and looked up in MODELS so it can never be a model /api/chat would reject.
+ * If the id is ever dropped from MODELS, the first entry takes over.
+ */
+export const DEFAULT_MODEL =
+  MODELS.find((m) => m.id === "sfdc_ai__DefaultBedrockAnthropicClaude48Opus")
+    ?.id ??
+  MODELS[0]?.id ??
+  ""
 
 /**
  * Time budget for a single Models API generation before we abort it and return
