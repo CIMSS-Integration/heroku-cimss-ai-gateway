@@ -29,15 +29,23 @@ export type ModelConfig = {
 }
 
 export const MODELS: ModelConfig[] = [
+  // --- 1M-token context window ---
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
     label: "Claude Opus 4.8 (Bedrock)",
     description: "Anthropic Claude Opus, served via Amazon Bedrock",
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
   },
   {
-    id: "sfdc_ai__DefaultBedrockAnthropicClaude46Sonnet",
-    label: "Claude Sonnet 4.6 (Bedrock)",
+    id: "sfdc_ai__DefaultVertexAIGemini35Flash",
+    label: "Gemini 3.5 Flash (Vertex AI)",
+    description: "Google Gemini 3.5 Flash, via Vertex AI",
+    contextWindow: 1_000_000,
+  },
+  // --- 200K-token context window ---
+  {
+    id: "sfdc_ai__DefaultBedrockAnthropicClaude5Sonnet",
+    label: "Claude Sonnet 5 (Bedrock)",
     description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
     contextWindow: 200_000,
   },
@@ -51,19 +59,13 @@ export const MODELS: ModelConfig[] = [
     id: "sfdc_ai__DefaultGPT55",
     label: "GPT-5.5 (OpenAI)",
     description: "OpenAI GPT-5.5",
-    contextWindow: 128_000,
+    contextWindow: 200_000,
   },
   {
     id: "sfdc_ai__DefaultBedrockNvidiaNemotronSuper3120b",
     label: "Nemotron Super 3.1 (Bedrock)",
     description: "NVIDIA Llama Nemotron Super 3.1 20B, via Amazon Bedrock",
-    contextWindow: 128_000,
-  },
-  {
-    id: "sfdc_ai__DefaultVertexAIGemini35Flash",
-    label: "Gemini 3.5 Flash (Vertex AI)",
-    description: "Google Gemini 3.5 Flash, via Vertex AI",
-    contextWindow: 1_000_000,
+    contextWindow: 200_000,
   },
 ]
 
