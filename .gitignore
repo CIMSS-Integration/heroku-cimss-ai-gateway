@@ -42,3 +42,10 @@ next-env.d.ts
 
 # Local reference docs (may contain secrets)
 docs/
+
+# Reference/test documents kept locally. These are large binaries (the MIMIT
+# Admin Guide is 65 MB of screenshots) and may contain customer content — not
+# source, and a committed binary can't be removed from history later.
+*.pdf
+*.docx
+*.doc
