@@ -33,6 +33,7 @@ import {
   SYSTEM_PROMPT,
   CONTEXT_WARN_RATIO,
   contextWindowFor,
+  pickerLabel,
 } from "@/config/models"
 import {
   ACCEPT_ATTR,
@@ -1096,7 +1097,7 @@ export default function ChatPage() {
             >
               {MODELS.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.label}
+                  {pickerLabel(m)}
                 </option>
               ))}
             </select>

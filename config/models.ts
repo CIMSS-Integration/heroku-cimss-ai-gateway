@@ -72,6 +72,28 @@ export const MODELS: ModelConfig[] = [
 /** Fallback window for a model that somehow lacks one configured. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 
+/** Context window as a short display string: 1_000_000 → "1M", 200_000 → "200K". */
+export function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+  }
+  return `${Math.round(tokens / 1_000)}K`
+}
+
+/**
+ * Label for the model picker, with the context window folded into the label's
+ * existing parenthetical — "Claude Opus 4.8 (Bedrock · 1M)" rather than a second
+ * pair of brackets. Derived from `contextWindow` instead of being written into
+ * `label`, so the number can't drift from the value the context checks use.
+ */
+export function pickerLabel(model: ModelConfig): string {
+  const window = formatContextWindow(model.contextWindow)
+  return model.label.endsWith(")")
+    ? `${model.label.slice(0, -1)} · ${window})`
+    : `${model.label} (${window})`
+}
+
 /** Look up a model's context window (tokens), falling back to the default. */
 export function contextWindowFor(modelId: string | null): number {
   const model = MODELS.find((m) => m.id === modelId)
