@@ -209,14 +209,30 @@ function PromptInputAction({
 }: PromptInputActionProps) {
   const { disabled } = usePromptInput()
 
+  // `render` makes the child *be* the trigger rather than nesting inside it.
+  // Passing the child as `children` instead emits <button> inside <button>
+  // (TooltipTrigger renders its own button), which is invalid HTML and shows up
+  // as a React error in the dev overlay for every action button here.
+  const child = React.isValidElement(children)
+    ? (children as React.ReactElement<Record<string, unknown>>)
+    : null
+
   return (
     <Tooltip {...props}>
-      <TooltipTrigger
-        disabled={disabled}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {children}
-      </TooltipTrigger>
+      {child ? (
+        <TooltipTrigger
+          disabled={disabled}
+          onClick={(event) => event.stopPropagation()}
+          render={child}
+        />
+      ) : (
+        <TooltipTrigger
+          disabled={disabled}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {children}
+        </TooltipTrigger>
+      )}
       <TooltipContent side={side} className={className}>
         {tooltip}
       </TooltipContent>

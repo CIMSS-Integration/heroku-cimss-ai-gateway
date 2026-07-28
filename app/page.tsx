@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import Image from "next/image"
-import { ArrowUp, BarChart3, PanelLeft } from "lucide-react"
+import { ArrowUp, BarChart3, FileText, Paperclip, PanelLeft, X } from "lucide-react"
 import { Sparkles } from "lucide-react"
 import { Show, SignIn, UserButton, useAuth } from "@clerk/nextjs"
 
@@ -34,6 +34,18 @@ import {
   CONTEXT_WARN_RATIO,
   contextWindowFor,
 } from "@/config/models"
+import {
+  ACCEPT_ATTR,
+  ACCEPTED_TYPES,
+  KNOWN_REJECTED,
+  MAX_UPLOAD_BYTES,
+  estimateTokens,
+} from "@/config/attachments"
+import {
+  formatAttachmentBlock,
+  splitAttachment,
+  withAttachment,
+} from "@/lib/attachment-format"
 import { cn } from "@/lib/utils"
 import type {
   ChatMessage,
@@ -41,6 +53,15 @@ import type {
   ChatProjectSummary,
   ChatSessionSummary,
 } from "@/lib/types"
+
+/** An extracted attachment staged in the composer, ready to send. */
+type StagedAttachment = {
+  name: string
+  kindLabel: string
+  pages: number | null
+  text: string
+  estTokens: number
+}
 
 /** The MIMIT Healthcare brand mark — the sage-teal leaf tile from the logo.
  *  Size it via `className` on the wrapper; the image is scaled slightly to
@@ -68,6 +89,39 @@ function BrandMark({ className }: { className?: string }) {
 function modelLabel(id: string | null): string | null {
   if (!id) return null
   return MODELS.find((m) => m.id === id)?.label ?? id
+}
+
+/**
+ * A user turn in the transcript. An attached file's full text travels inside the
+ * message content (the Models API has nowhere else to put it), so it's split back
+ * out here and shown as a chip — otherwise a 100k-character document would render
+ * inside the chat bubble. Works the same for a just-sent message and for one
+ * loaded from the database on resume, since both are just content strings.
+ */
+function UserTurn({ content }: { content: string }) {
+  const { attachments, body } = splitAttachment(content)
+  return (
+    <div className="flex max-w-[80%] flex-col items-end gap-1.5">
+      {attachments.map((file, i) => (
+        <span
+          key={i}
+          className="border-border bg-muted text-muted-foreground flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs"
+          title={`${file.text.length.toLocaleString()} characters of extracted text`}
+        >
+          <FileText className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate font-medium">{file.name}</span>
+          <span className="shrink-0">
+            ~{estimateTokens(file.text).toLocaleString()} tokens
+          </span>
+        </span>
+      ))}
+      {body && (
+        <MessageContent className="bg-secondary text-secondary-foreground rounded-2xl px-4 py-2.5">
+          {body}
+        </MessageContent>
+      )}
+    </div>
+  )
 }
 
 /** Time-of-day greeting for the empty state, in the viewer's local time. */
@@ -173,10 +227,19 @@ export default function ChatPage() {
   const [sfUsername, setSfUsername] = useState<string | null>(null)
   const [linkedProviders, setLinkedProviders] = useState<string[]>([])
 
+  // A file attached to the *next* message: extracted to text server-side and
+  // held here until send. Cleared on send, on new chat, and on chat switch.
+  const [attachment, setAttachment] = useState<StagedAttachment | null>(null)
+  const [isAttaching, setIsAttaching] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // A staged attachment counts as content on its own — a file plus no question
+  // is a reasonable "summarize this" send.
   const canSend =
-    input.trim().length > 0 &&
+    (input.trim().length > 0 || attachment !== null) &&
     !isLoading &&
     !isSummarizing &&
+    !isAttaching &&
     !activeChatReadOnly
   const sidebarDisabled = isLoading || isResuming
 
@@ -386,6 +449,9 @@ export default function ChatPage() {
     setContextLimitHit(false)
     setBannerDismissed(false)
     setNotice(null)
+    // A staged file belongs to the conversation it was attached in — its
+    // context-fit was measured against that chat's usage and model.
+    setAttachment(null)
   }
 
   function handleNewChat() {
@@ -654,9 +720,77 @@ export default function ChatPage() {
     }
   }
 
+  /** Bytes → short human string, matching the server's error copy. */
+  function humanSize(bytes: number): string {
+    const mb = 1024 * 1024
+    return bytes >= mb
+      ? `${(bytes / mb).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(bytes / 1024))} KB`
+  }
+
+  /**
+   * Extract an uploaded file to text via /api/attach and stage it for the next
+   * message. Obvious rejections (type, size) are caught here for an instant
+   * response, but the server re-checks everything — this is UX, not validation.
+   */
+  async function handleFileSelected(file: File) {
+    setError(null)
+    setNotice(null)
+
+    const ext = (/\.[^.\\/]+$/.exec(file.name.toLowerCase()) ?? [""])[0]
+    if (!ACCEPTED_TYPES.some((t) => t.ext === ext)) {
+      const known = KNOWN_REJECTED.find((r) => r.exts.includes(ext))
+      setError(
+        known?.reason ??
+          (ext
+            ? `${ext} files aren't supported. Attach a .txt, .docx, or .pdf.`
+            : "That file has no extension, so its type can't be determined. Attach a .txt, .docx, or .pdf.")
+      )
+      return
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError(
+        `That file is ${humanSize(file.size)} — the limit is ${humanSize(MAX_UPLOAD_BYTES)}. ` +
+          `Attach a smaller file, or paste the relevant section as text.`
+      )
+      return
+    }
+
+    setIsAttaching(true)
+    try {
+      const body = new FormData()
+      body.append("file", file)
+      // The server needs both to judge whether the extracted text still fits:
+      // the window depends on the model, and how much is left depends on how
+      // much this conversation already occupies.
+      body.append("model", model)
+      body.append("usedTokens", String(inputTokens ?? 0))
+
+      const res = await fetch("/api/attach", { method: "POST", body })
+      const data = await readJson(res)
+      if (!res.ok || !data) {
+        throw new Error(errorFor(res, data, "That file couldn't be attached."))
+      }
+      setAttachment({
+        name: data.name as string,
+        kindLabel:
+          ACCEPTED_TYPES.find((t) => t.kind === data.kind)?.label ??
+          (data.kind as string),
+        pages: (data.pages as number | null) ?? null,
+        text: data.text as string,
+        estTokens: data.estTokens as number,
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That file couldn't be attached.")
+    } finally {
+      setIsAttaching(false)
+    }
+  }
+
   async function handleSubmit() {
     const text = input.trim()
-    if (!text || isLoading || isSummarizing) return
+    // An attachment alone is enough to send; text alone still is too.
+    if ((!text && !attachment) || isLoading || isSummarizing || isAttaching) return
 
     setError(null)
     setNotice(null)
@@ -667,14 +801,30 @@ export default function ChatPage() {
     // Capture the model at send time — the picker may change before the
     // reply lands, and this turn was generated by the model chosen now.
     const modelUsed = model
+    // The attachment's text is embedded in the message content itself — the
+    // Models API is stateless, so anything the model must see has to travel in
+    // `messages[].content`. The transcript strips it back out for display.
+    const staged = attachment
+    const content = staged
+      ? withAttachment(
+          text,
+          formatAttachmentBlock({
+            name: staged.name,
+            kindLabel: staged.kindLabel,
+            pages: staged.pages,
+            text: staged.text,
+          })
+        )
+      : text
     const userMessage: ChatMessageWithModel = {
       role: "user",
-      content: text,
+      content,
       model: null,
     }
     const history = [...messages, userMessage]
     setMessages(history)
     setInput("")
+    setAttachment(null)
     setIsLoading(true)
 
     // Send the full conversation each turn so the model has context. The
@@ -710,6 +860,9 @@ export default function ChatPage() {
           setContextLimitHit(true)
           setMessages((prev) => prev.slice(0, -1))
           setInput(text)
+          // Hand the file back too, so the send can be retried after
+          // summarizing rather than re-uploading.
+          if (staged) setAttachment(staged)
           return
         }
         throw new Error(errorFor(res, data, "Request failed"))
@@ -748,6 +901,7 @@ export default function ChatPage() {
       // Drop the user turn back into the input so it isn't lost.
       setMessages((prev) => prev.slice(0, -1))
       setInput(text)
+      if (staged) setAttachment(staged)
     } finally {
       setIsLoading(false)
     }
@@ -883,7 +1037,47 @@ export default function ChatPage() {
         onSubmit={handleSubmit}
         className="border-border bg-card w-full rounded-3xl shadow-sm"
       >
-        <PromptInputTextarea placeholder="How can I help you today?" />
+        {(attachment || isAttaching) && (
+          <div className="mb-1 flex flex-wrap gap-2">
+            {isAttaching ? (
+              <span className="border-border text-muted-foreground flex items-center gap-2 rounded-lg border border-dashed px-2.5 py-1.5 text-xs">
+                <Loader variant="typing" />
+                Reading file…
+              </span>
+            ) : (
+              attachment && (
+                <span className="border-border bg-muted text-foreground flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs">
+                  <FileText className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate font-medium">{attachment.name}</span>
+                  <span className="text-muted-foreground shrink-0">
+                    {attachment.pages
+                      ? `${attachment.pages} ${attachment.pages === 1 ? "page" : "pages"} · `
+                      : ""}
+                    ~{attachment.estTokens.toLocaleString()} tokens
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setAttachment(null)
+                    }}
+                    className="text-muted-foreground hover:text-foreground shrink-0 rounded"
+                    aria-label={`Remove ${attachment.name}`}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              )
+            )}
+          </div>
+        )}
+        <PromptInputTextarea
+          placeholder={
+            attachment
+              ? "Ask something about this file…"
+              : "How can I help you today?"
+          }
+        />
         <PromptInputActions className="items-center justify-between pt-2">
           {/* Contain pointer/click here so they don't bubble to PromptInput's
               root onClick, which refocuses the textarea and would snap the
@@ -907,18 +1101,53 @@ export default function ChatPage() {
               ))}
             </select>
           </label>
-          <PromptInputAction tooltip="Send message">
-            <Button
-              type="button"
-              size="icon"
-              className="h-9 w-9 rounded-full"
-              disabled={!canSend}
-              onClick={handleSubmit}
-              aria-label="Send message"
+          <div className="ml-auto flex items-center gap-1">
+            {/* Same containment as the model picker: keep pointer events off
+                PromptInput's root so opening the OS file dialog doesn't also
+                refocus the textarea. */}
+            <span
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
             >
-              <ArrowUp className="h-4 w-4" />
-            </Button>
-          </PromptInputAction>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT_ATTR}
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  // Reset first so re-picking the same file fires onChange again.
+                  e.target.value = ""
+                  if (file) handleFileSelected(file)
+                }}
+              />
+              <PromptInputAction tooltip="Attach a .txt, .docx, or .pdf">
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground h-9 w-9 rounded-full"
+                  disabled={isLoading || isSummarizing || isAttaching}
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach a file"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              </PromptInputAction>
+            </span>
+            <PromptInputAction tooltip="Send message">
+              <Button
+                type="button"
+                size="icon"
+                className="h-9 w-9 rounded-full"
+                disabled={!canSend}
+                onClick={handleSubmit}
+                aria-label="Send message"
+              >
+                <ArrowUp className="h-4 w-4" />
+              </Button>
+            </PromptInputAction>
+          </div>
         </PromptInputActions>
       </PromptInput>
       <p className="text-muted-foreground mt-2 text-center text-xs">
@@ -1101,9 +1330,7 @@ export default function ChatPage() {
                         {messages.map((message, index) =>
                           message.role === "user" ? (
                             <Message key={index} className="justify-end">
-                              <MessageContent className="bg-secondary text-secondary-foreground max-w-[80%] rounded-2xl px-4 py-2.5">
-                                {message.content}
-                              </MessageContent>
+                              <UserTurn content={message.content} />
                             </Message>
                           ) : (
                             <Message key={index} className="justify-start">
