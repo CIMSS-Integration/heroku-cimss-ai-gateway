@@ -3,7 +3,11 @@ import { auth } from "@clerk/nextjs/server"
 import { generateChatTitle } from "@/lib/salesforce"
 import { getSession, renameSession } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
-import { TITLE_TIMEOUT_MS, contextWindowFor } from "@/config/models"
+import {
+  TITLE_TIMEOUT_MS,
+  contextWindowFor,
+  resolveModel,
+} from "@/config/models"
 
 // The Salesforce client / pg need the Node runtime.
 export const runtime = "nodejs"
@@ -72,10 +76,14 @@ export async function POST(_request: Request, { params }: RouteParams) {
       `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`
     let transcript = conversation.map(render).join("\n\n")
 
+    // The stored model may name one the org no longer has enabled (see
+    // resolveModel); resolve once and use it for both the budget and the call.
+    const model = resolveModel(session.model)
+
     // Reduce only when the full transcript would risk overflowing the model;
     // then keep the last few messages rather than head-truncating.
     const budgetChars = Math.floor(
-      contextWindowFor(session.model) * CHARS_PER_TOKEN * 0.5
+      contextWindowFor(model) * CHARS_PER_TOKEN * 0.5
     )
     if (transcript.length > budgetChars) {
       transcript = conversation
@@ -84,11 +92,7 @@ export async function POST(_request: Request, { params }: RouteParams) {
         .join("\n\n")
     }
 
-    const title = await generateChatTitle(
-      session.model,
-      transcript,
-      TITLE_TIMEOUT_MS
-    )
+    const title = await generateChatTitle(model, transcript, TITLE_TIMEOUT_MS)
     if (!title) {
       return NextResponse.json(
         { error: "Couldn't generate a title. Please try again." },

@@ -88,7 +88,10 @@ export async function POST(request: Request) {
     return fail("That file couldn't be processed.", 500)
   }
 
-  const estTokens = estimateTokens(extracted.text)
+  // Calibrated to the target model — the same text can cost ~1.6x more on Claude
+  // than on Gemini, so an uncalibrated figure here would mislead the user about
+  // whether their document fits.
+  const estTokens = estimateTokens(extracted.text, model)
 
   if (model) {
     const window = contextWindowFor(model)

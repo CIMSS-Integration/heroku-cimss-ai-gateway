@@ -10,6 +10,8 @@
  * possible on chat-generations" and `scripts/probes/document-base64-by-type.mjs`.
  */
 
+import { tokenFactorFor } from "./models"
+
 export type AttachmentKind = "txt" | "docx" | "pdf"
 
 export type AcceptedType = {
@@ -82,15 +84,126 @@ export const KNOWN_REJECTED: { exts: string[]; reason: string }[] = [
 ]
 
 /**
- * Rough characters-per-token for English prose. Only an estimate — the Models
- * API doesn't expose a tokenizer — so the context check leaves headroom below
- * rather than pretending to be exact.
+ * Rough characters-per-token for English prose. Retained for callers that only
+ * need a coarse character budget; `estimateTokens` no longer uses it.
  */
 export const CHARS_PER_TOKEN = 4
 
-/** Estimated input tokens for a chunk of text. Deliberately conservative. */
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
+/**
+ * Structural token estimate, tokenizer-agnostic.
+ *
+ * A flat chars-per-token ratio is badly wrong for anything that isn't prose,
+ * which is what this replaces. `text.length / 4` under-counted an 819 KB SQL
+ * script by 2.24x on Claude — reporting ~205k tokens for what actually cost
+ * 458,916 — so the file read as a comfortable fit and was then rejected outright
+ * by the platform.
+ *
+ * The dominant effect is that real tokenizers do NOT charge per character; they
+ * charge per *symbol*. Punctuation and digits are near one token each, while a
+ * common word of any length is often a single token. SQL is mostly punctuation,
+ * identifiers, and long digit runs — the worst case — whereas prose is mostly
+ * word runs. So we count structure instead of length:
+ *
+ *   - a run of letters   → ceil(run / 4), approximating BPE word merging
+ *   - each digit         → 1  (long numerals really do cost ~1 token per digit)
+ *   - each punctuation / symbol / non-ASCII char → 1
+ *   - newline            → 1
+ *   - space, tab, CR     → free (absorbed into adjacent tokens)
+ *
+ * On the measured SQL payload this yields ~0.41 tokens/char, against the flat
+ * ratio's 0.25 and the real 0.56 (Claude) / 0.35 (Gemini) — close enough that a
+ * single per-family multiplier (`tokenFactor`) lands within a few percent, which
+ * one flat constant could never do for both families at once.
+ *
+ * Single O(n) pass with no allocation: this runs on uploads up to
+ * MAX_UPLOAD_BYTES, where a regex-match-per-symbol approach would allocate
+ * millions of objects.
+ */
+function structuralTokens(text: string): number {
+  let tokens = 0
+  let letterRun = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+      letterRun++
+      continue
+    }
+    if (letterRun > 0) {
+      tokens += Math.ceil(letterRun / 4)
+      letterRun = 0
+    }
+    if (c === 32 || c === 9 || c === 13) continue // space, tab, CR
+    tokens += 1 // newline, digit, punctuation, symbol, non-ASCII
+  }
+  if (letterRun > 0) tokens += Math.ceil(letterRun / 4)
+  return tokens
+}
+
+/**
+ * Symbol density of a text: structural tokens per flat chars/4 token. ~1.09 for
+ * English prose, ~1.63 for SQL. This is the knob that tells prose apart from code
+ * without needing to know the file type.
+ */
+function symbolDensity(text: string, structural: number): number {
+  const flat = Math.ceil(text.length / CHARS_PER_TOKEN)
+  if (flat <= 0) return PROSE_DENSITY
+  // Clamped to the range we actually measured. Outside it we would be
+  // extrapolating a straight line with no data behind it — an all-punctuation
+  // file would otherwise be estimated at over 2x its true cost.
+  return Math.min(Math.max(structural / flat, PROSE_DENSITY), SQL_DENSITY)
+}
+
+/** Measured density of English prose — the anchor `tokenFactor` is calibrated at. */
+const PROSE_DENSITY = 1.087
+/** Measured density of the SQL maintenance scripts — the dense end of the range. */
+const SQL_DENSITY = 1.634
+
+/**
+ * How much the calibration factor rises per unit of symbol density.
+ *
+ * Measured 2026-07-30, same payloads on both models. The needed factor moves with
+ * density at almost the same rate for both families — slope 0.59 for Gemini, 0.52
+ * for Claude — so one shared sensitivity plus a per-model prose baseline fits both
+ * anchors, rather than needing a full curve per model:
+ *
+ *   model    prose (d=1.087)   SQL (d=1.634)
+ *   Gemini   0.545             0.869
+ *   Claude   1.085             1.370
+ *
+ * 0.6 is used rather than the fitted ~0.55 so that the residual error at the
+ * dense end is positive on both models (+0.5% Gemini, +3.1% Claude) — over- not
+ * under-estimating, since under-estimating is what causes a hard rejection.
+ */
+const DENSITY_SENSITIVITY = 0.6
+
+/**
+ * Estimated input tokens for a chunk of text, calibrated for the target model and
+ * the text's own symbol density.
+ *
+ * Both inputs matter, and a single constant cannot stand in for either. Measured
+ * chars-per-token across the two extremes:
+ *
+ *              prose   SQL
+ *   Gemini     6.75    2.82
+ *   Claude     3.39    1.79
+ *
+ * That is a 2.4x swing across content types and a 2x swing across models — so the
+ * old flat `length / 4` was wrong by -30% to -55% on SQL, while a fixed per-model
+ * multiplier tuned to fix that would have inflated ordinary prose by ~1.5x and
+ * started rejecting .docx/.pdf uploads that fit perfectly well.
+ *
+ * Pass `modelId` wherever it's known. Omitting it assumes the most expensive
+ * measured family, so an unattributed estimate errs high — a premature warning
+ * rather than a hard platform rejection.
+ */
+export function estimateTokens(text: string, modelId?: string | null): number {
+  const structural = structuralTokens(text)
+  if (structural === 0) return 0
+  const density = symbolDensity(text, structural)
+  const factor =
+    tokenFactorFor(modelId ?? null) +
+    DENSITY_SENSITIVITY * (density - PROSE_DENSITY)
+  return Math.ceil(structural * Math.max(0.3, factor))
 }
 
 /**

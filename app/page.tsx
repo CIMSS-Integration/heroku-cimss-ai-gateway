@@ -99,7 +99,17 @@ function modelLabel(id: string | null): string | null {
  * inside the chat bubble. Works the same for a just-sent message and for one
  * loaded from the database on resume, since both are just content strings.
  */
-function UserTurn({ content }: { content: string }) {
+// `modelId` is the currently selected model, so the token figure on a sent
+// message matches the one the attach step quoted. Estimates are model-calibrated
+// (see `tokenFactor`), so omitting it would make the same file appear to change
+// size between staging and sending.
+function UserTurn({
+  content,
+  modelId,
+}: {
+  content: string
+  modelId: string | null
+}) {
   const { attachments, body } = splitAttachment(content)
   return (
     <div className="flex max-w-[80%] flex-col items-end gap-1.5">
@@ -112,7 +122,7 @@ function UserTurn({ content }: { content: string }) {
           <FileText className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate font-medium">{file.name}</span>
           <span className="shrink-0">
-            ~{estimateTokens(file.text).toLocaleString()} tokens
+            ~{estimateTokens(file.text, modelId).toLocaleString()} tokens
           </span>
         </span>
       ))}
@@ -954,6 +964,10 @@ export default function ChatPage() {
   // Context-window prompt: shown as we near the limit (proactive) or after a
   // hard rejection. Summarizing needs a persisted chat, so it's gated on a
   // sessionId; the near-limit check compares the last turn's input tokens.
+  // The model's real token window. The platform's separate character limit
+  // (PLATFORM_PROMPT_CHAR_LIMIT) is not expressible here — it bounds a single
+  // prompt's length, not how full the conversation's token window is — so it must
+  // not be substituted for this value.
   const contextWindow = contextWindowFor(model)
   const nearLimit =
     inputTokens != null && inputTokens >= contextWindow * CONTEXT_WARN_RATIO
@@ -1331,7 +1345,7 @@ export default function ChatPage() {
                         {messages.map((message, index) =>
                           message.role === "user" ? (
                             <Message key={index} className="justify-end">
-                              <UserTurn content={message.content} />
+                              <UserTurn content={message.content} modelId={model} />
                             </Message>
                           ) : (
                             <Message key={index} className="justify-start">

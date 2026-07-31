@@ -24,16 +24,28 @@ function isLocalHost(host: string): boolean {
  * Send plain-http visitors to https (people reach ai.cimss.com / ai.themimit.com
  * over http by mistake).
  *
- * Heroku terminates TLS at its router, so an http request still arrives here as
- * an ordinary request — the original scheme survives only in `x-forwarded-proto`
- * (comma-joined if it passed through more than one proxy; the first hop is the
- * client's).
+ * OPT-IN, and deliberately so. `x-forwarded-proto` is NOT a reliable signal that
+ * the client used http, because Next fills the header in itself when the incoming
+ * socket isn't TLS:
  *
- * Two guards keep local work off this path, because `next dev` sets
- * `x-forwarded-proto: http` on its own requests — without them, http://localhost
- * redirects to an https://localhost that nothing is listening on: we only run in
- * production builds, and never for a localhost/loopback Host (so `next start`
- * against the local machine still works).
+ *     req.headers['x-forwarded-proto'] ??= isHttps ? 'https' : 'http'
+ *     — node_modules/next/dist/server/base-server.js
+ *
+ * Behind a TLS-terminating proxy (Heroku's router) that default never applies:
+ * the proxy always sets the header, so it faithfully reports the client's scheme.
+ * Behind a plain-http proxy — nginx on EC2 serving port 80 — it is always "http"
+ * whether or not nginx sets it, so an unconditional redirect sends *every*
+ * request to an https URL that nothing is listening on. That is a hard outage,
+ * not a degraded experience, and it can't be detected from the request alone.
+ *
+ * So the deployment declares its own capability: set HTTPS_REDIRECT=1 only where
+ * TLS actually terminates in front of this app. Unset (the EC2 default today)
+ * means serve http as-is. When TLS is added there — see deploy/nginx-sfchat.conf
+ * — set it in /opt/sfchat/.env.local and restart.
+ *
+ * The remaining guards keep local work off this path: we only run in production
+ * builds, and never for a localhost/loopback Host, so `next start` against the
+ * local machine still works.
  *
  * The target host comes from the forwarded/Host header rather than
  * `request.url`, whose host is whatever the platform routed to internally. The
@@ -42,6 +54,7 @@ function isLocalHost(host: string): boolean {
  */
 function httpsRedirect(request: NextRequest): NextResponse | null {
   if (process.env.NODE_ENV !== "production") return null
+  if (process.env.HTTPS_REDIRECT !== "1") return null
 
   const proto = request.headers.get("x-forwarded-proto")?.split(",")[0].trim()
   if (proto !== "http") return null

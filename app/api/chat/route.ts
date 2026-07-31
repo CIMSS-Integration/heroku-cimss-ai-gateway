@@ -13,7 +13,12 @@ import {
   getSessionContext,
 } from "@/lib/chat-store"
 import { getSalesforceUsername } from "@/lib/identity"
-import { MODELS, GENERATION_TIMEOUT_MS, TITLE_TIMEOUT_MS } from "@/config/models"
+import {
+  MODELS,
+  GENERATION_TIMEOUT_MS,
+  TITLE_TIMEOUT_MS,
+  PLATFORM_PROMPT_CHAR_LIMIT,
+} from "@/config/models"
 import type { ChatMessage, ChatMessageWithModel, ChatRole } from "@/lib/types"
 
 // The Salesforce client uses Node APIs / env vars — force the Node runtime.
@@ -96,6 +101,23 @@ function isContextLimitError(message: string): boolean {
   return /context (length|window)|maximum context|too many tokens|token limit|exceeds? the maximum|input is too long|prompt is too long|reduce the (length|number of tokens)|max(imum)?[ _-]?tokens/i.test(
     message
   )
+}
+
+/**
+ * Is this the Einstein Trust Layer's PII prompt cap rather than the model's
+ * context window? Distinguishing them matters because the remedies are opposite:
+ * the context limit is fixed by summarizing this chat, while the PII cap is an
+ * org-wide ceiling that summarizing will not move.
+ *
+ *   400 BAD_ARGUMENT / E30036
+ *   "Prompt size exceeds the token limit for when PII is enabled."
+ *
+ * Must be tested BEFORE isContextLimitError, which also matches this text on
+ * "token limit" and would otherwise tell the user to summarize a chat whose
+ * single attachment is the problem. See PLATFORM_PROMPT_CHAR_LIMIT.
+ */
+function isPiiPromptCapError(message: string): boolean {
+  return /E30036/.test(message) || /token limit for when PII is enabled/i.test(message)
 }
 
 export async function POST(request: Request) {
@@ -236,11 +258,10 @@ export async function POST(request: Request) {
 
   // FR2: for a brand-new chat, generate its title CONCURRENTLY with the main
   // reply (from the user's message alone), rather than chaining a second model
-  // call after it. Chaining two ≤28s calls could push the request past Heroku's
-  // 30s router timeout (H12) and lose the reply; running them in parallel keeps
-  // the total ≈ max(), and the short TITLE_TIMEOUT_MS bounds a slow title so it
-  // can't hold up a fast reply. Best-effort — resolves null on failure/timeout,
-  // and createSession falls back to the message-derived title.
+  // call after it. Running them in parallel keeps the total ≈ max() instead of
+  // the sum, and the short TITLE_TIMEOUT_MS bounds a slow title so it can't hold
+  // up a fast reply. Best-effort — resolves null on failure/timeout, and
+  // createSession falls back to the message-derived title.
   const firstUserMessage = conversation[0]?.content ?? ""
   const titlePromise: Promise<string | null> | null = activeSessionIdInput
     ? null
@@ -268,9 +289,9 @@ export async function POST(request: Request) {
       model: usage?.model,
     })
   } catch (error) {
-    // Timed out before Heroku's router limit — return a clean 504 (not the
-    // platform's HTML H12) and, because this is before the persistence step,
-    // the half-finished turn is never saved.
+    // Timed out before nginx's proxy_read_timeout — return a clean JSON 504
+    // (not the proxy's HTML error page) and, because this is before the
+    // persistence step, the half-finished turn is never saved.
     if (error instanceof GenerationTimeoutError) {
       console.error("[/api/chat] model call timed out", error.timeoutMs)
       return NextResponse.json(
@@ -285,6 +306,25 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error"
     console.error("[/api/chat] model call failed", message)
+    // The platform's PII cap looks like a context error but isn't one, and
+    // summarizing won't help: the ceiling applies to any single prompt, however
+    // short the conversation. Say so, and name the real lever.
+    if (isPiiPromptCapError(message)) {
+      console.error("[/api/chat] platform PII prompt cap hit", { model })
+      return NextResponse.json(
+        {
+          error:
+            `That prompt is too long for this Salesforce org, which limits any single ` +
+            `request to roughly ${Math.round(PLATFORM_PROMPT_CHAR_LIMIT / 1000)},000 characters ` +
+            `when Trust Layer PII detection is on. This is a length limit, not the model's ` +
+            `context window — ${MODELS.find((m) => m.id === model)?.label ?? model} has room for ` +
+            `far more, and summarizing won't help because the limit applies to each request on ` +
+            `its own. Split the document into parts and send them separately.`,
+          code: "pii_prompt_cap",
+        },
+        { status: 413 }
+      )
+    }
     // Surface a context-limit rejection with a machine code so the client can
     // offer to summarize instead of showing a raw error.
     if (isContextLimitError(message)) {

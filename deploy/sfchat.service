@@ -1,0 +1,62 @@
+# systemd unit for the Next.js server. Installed to /etc/systemd/system/sfchat.service.
+#
+#   sudo systemctl enable --now sfchat
+#   sudo systemctl restart sfchat
+#   journalctl -u sfchat -f          # the app's console.log output lands here
+#
+# Replaces the Heroku dyno + Procfile (`web: npm run start`). Restart=always is
+# what makes this survive a crash, and WantedBy=multi-user.target is what makes
+# it survive an instance reboot.
+
+[Unit]
+Description=Salesforce Models API Chat (Next.js)
+Documentation=file:///opt/sfchat/deploy/nginx-sfchat.conf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/opt/sfchat
+
+# Next loads .env.local from the working directory at startup, so the Salesforce,
+# Clerk, and Postgres secrets come from /opt/sfchat/.env.local — deliberately not
+# listed here, to keep credentials out of a world-readable unit file.
+Environment=NODE_ENV=production
+
+# `-H localhost` must stay EXACTLY that — not 127.0.0.1, and not 0.0.0.0.
+#
+# It still binds loopback only (localhost resolves to 127.0.0.1 here; the box has
+# no IPv6), so nginx remains the only way in even if the security group ever
+# opens 3000. But the literal spelling is load-bearing:
+#
+# clerkMiddleware attaches its x-clerk-* request headers by rewriting to the
+# request's own absolute URL, which Next reports as http://localhost:3000/.
+# Next 16 resolves such a rewrite internally only when the target host matches
+# the server's own bound hostname; otherwise it treats it as an EXTERNAL target
+# and proxies to it. Bound as 127.0.0.1, "localhost:3000" did not match, so every
+# request was proxied to this same server, re-entered the middleware, and looped —
+# ~274 iterations in 8s, RSS climbing past 900 MB, and the request never
+# answering. Bound as localhost, the origins agree and the rewrite stays internal.
+#
+# Symptom if this regresses: requests hang with no response, and the journal shows
+# `Failed to proxy http://localhost:3000/`.
+#
+# Invoking next's bin directly rather than via `npm run start` means systemd
+# signals reach node itself, so stop/restart is clean instead of leaving orphans.
+ExecStart=/usr/bin/node /opt/sfchat/node_modules/next/dist/bin/next start -H localhost -p 3000
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sfchat
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

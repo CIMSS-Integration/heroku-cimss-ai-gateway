@@ -19,12 +19,27 @@ type UserLike = { externalAccounts?: ExternalAccountLike[] } | null | undefined
 
 /**
  * True if a Clerk external-account provider slug is this app's Salesforce SSO
- * connection. Clerk names custom OAuth connections `oauth_custom_<slug>`, and
- * the slug differs per Clerk instance — both confirmed from real logins:
- *   - dev instance:               `oauth_custom_salesforce_mimit_prod`
- *   - prod (clerk.themimit.com):  `oauth_custom_mimit_prod_sf`
- * So we accept either the word "salesforce" or an "sf" token. A user of this
- * app only ever links the Salesforce connection, so this won't misidentify.
+ * connection. Clerk names custom OAuth connections `oauth_custom_<slug>`, and the
+ * slug is per-connection, NOT per-environment — three instances exist and the
+ * names do not track dev-vs-prod:
+ *
+ *   - `noted-pegasus-87.clerk.accounts.dev` (dev) → `oauth_custom_salesforce_mimit_prod`
+ *       Display name "Salesforce MIMIT Prod", but its discovery endpoint points at
+ *       a SANDBOX org. The name lies; do not trust it.
+ *   - `free-baboon-42.clerk.accounts.dev` (dev, app "CIMSSAIGateway") →
+ *       `oauth_custom_mimit_prod_sf`. Genuinely the production org
+ *       (`mimit.my.salesforce.com`). This is what the EC2 deployment uses.
+ *   - `clerk.themimit.com` (production, `pk_live`) → `oauth_custom_mimit_prod_sf`
+ *       Used by the Heroku deployment.
+ *
+ * So we accept either the word "salesforce" or an "sf" token, which covers all
+ * three. A user of this app only ever links the Salesforce connection, so this
+ * won't misidentify.
+ *
+ * If a login redirects to the wrong org, the cause is almost never this function —
+ * it is the publishable key selecting a different Clerk instance than the one you
+ * configured. Decode it to check: the part after `pk_test_`/`pk_live_` is the
+ * base64 frontend-API host.
  */
 function isSalesforceProvider(provider: string | null | undefined): boolean {
   const p = (provider ?? "").toLowerCase()

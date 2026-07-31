@@ -10,6 +10,7 @@ import {
   KEEP_RECENT_MESSAGES,
   GENERATION_TIMEOUT_MS,
   contextWindowFor,
+  resolveModel,
 } from "@/config/models"
 import type { ChatMessage } from "@/lib/types"
 
@@ -89,9 +90,12 @@ export async function POST(request: Request) {
     // (a sliding-window fallback) rather than 413-ing and leaving the chat
     // stuck. `summarizedCount` still marks the kept-verbatim boundary, so any
     // dropped-oldest messages simply fall out of context.
+    // The stored model may name one the org no longer has enabled (see
+    // resolveModel); resolve once and use it for both the budget and the call.
+    const model = resolveModel(session.model)
     const budgetChars = Math.max(
       4000,
-      Math.floor(contextWindowFor(session.model) * CHARS_PER_TOKEN * 0.6)
+      Math.floor(contextWindowFor(model) * CHARS_PER_TOKEN * 0.6)
     )
     const render = (m: (typeof toSummarize)[number]) =>
       `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`
@@ -123,7 +127,7 @@ export async function POST(request: Request) {
     ]
 
     const { content: summary, usage } = await chatGenerateWithTimeout(
-      session.model,
+      model,
       summaryMessages,
       GENERATION_TIMEOUT_MS
     )
@@ -137,7 +141,9 @@ export async function POST(request: Request) {
     // Log the summarization's token accounting, mirroring /api/chat.
     console.log("[/api/chat/summarize] usage", {
       sessionId,
-      model: session.model,
+      // The model that actually ran, which may differ from the one stored on the
+      // session — recording the stale id would misattribute the summary.
+      model,
       summarizedCount,
       keptRecent: KEEP_RECENT_MESSAGES,
       droppedOldest,
@@ -153,7 +159,7 @@ export async function POST(request: Request) {
       summarizedCount,
       {
         at: new Date().toISOString(),
-        model: session.model,
+        model,
         summarizedCount,
         keptRecent: KEEP_RECENT_MESSAGES,
         droppedOldest,
