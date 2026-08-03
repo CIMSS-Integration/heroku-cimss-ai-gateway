@@ -43,10 +43,12 @@ export type ModelConfig = {
    * 6.75 chars per token). No single constant can serve both, which is why this
    * is per-model rather than a shared chars-per-token figure.
    *
-   * Values below 1 mean "cheaper than the structural estimate". Unmeasured models
-   * carry the highest measured value as a deliberately conservative placeholder —
-   * over-estimating only warns early, whereas under-estimating produces a hard
-   * platform rejection with no warning at all.
+   * Values below 1 mean "cheaper than the structural estimate". An unmeasured model
+   * inherits the factor measured for its own tokenizer family (all Anthropic models
+   * share Claude's 1.09, all Gemini models share 0.55). A model belonging to no
+   * measured family carries the highest measured value as a deliberately
+   * conservative placeholder — over-estimating only warns early, whereas
+   * under-estimating produces a hard platform rejection with no warning at all.
    */
   tokenFactor: number
 }
@@ -54,40 +56,57 @@ export type ModelConfig = {
 export const MODELS: ModelConfig[] = [
   // --- 1M-token context window ---
   {
-    id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
-    label: "Claude Opus 4.8 (Bedrock)",
-    description: "Anthropic Claude Opus, served via Amazon Bedrock",
+    id: "sfdc_ai__DefaultGPT55",
+    label: "OpenAI GPT 5.5",
+    description: "OpenAI GPT-5.5",
     contextWindow: 1_000_000,
-    tokenFactor: 1.09, // measured 1.085 on prose (Anthropic tokenizer)
+    tokenFactor: 1.09, // UNMEASURED, no measured family — highest measured value
+  },
+  {
+    id: "sfdc_ai__DefaultVertexAIGemini31FlashLite",
+    label: "Gemini 3.1 Flash Lite",
+    description: "Fastest, lowest-cost Google Gemini, via Vertex AI",
+    contextWindow: 1_000_000,
+    tokenFactor: 0.55, // same Gemini tokenizer family as 3.5 Flash
+  },
+  {
+    id: "sfdc_ai__DefaultVertexAIGeminiPro31",
+    label: "Gemini 3.1 Pro",
+    description: "Google Gemini 3.1 Pro, via Vertex AI",
+    contextWindow: 1_000_000,
+    tokenFactor: 0.55, // same Gemini tokenizer family as 3.5 Flash
   },
   {
     id: "sfdc_ai__DefaultVertexAIGemini35Flash",
-    label: "Gemini 3.5 Flash (Vertex AI)",
+    label: "Gemini 3.5 Flash",
     description: "Google Gemini 3.5 Flash, via Vertex AI",
     contextWindow: 1_000_000,
     tokenFactor: 0.55, // measured 0.545 on prose — Gemini is ~2x cheaper here
   },
-  // --- 200K-token context window ---
+  // --- 64K-token context window (Einstein Trust Layer ceiling) ---
+  {
+    id: "sfdc_ai__DefaultBedrockAnthropicClaude48Opus",
+    label: "Claude Opus 4.8",
+    description:
+      "Anthropic Claude Opus via Amazon Bedrock — 64K context with Trust Layer",
+    contextWindow: 64_000,
+    tokenFactor: 1.09, // measured 1.085 on prose (Anthropic tokenizer)
+  },
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude5Sonnet",
-    label: "Claude Sonnet 5 (Bedrock)",
-    description: "Anthropic Claude Sonnet, served via Amazon Bedrock",
-    contextWindow: 200_000,
+    label: "Claude Sonnet 5",
+    description:
+      "Anthropic Claude Sonnet via Amazon Bedrock — 64K context with Trust Layer",
+    contextWindow: 64_000,
     tokenFactor: 1.09, // same Anthropic tokenizer family as Opus
   },
   {
     id: "sfdc_ai__DefaultBedrockAnthropicClaude45Haiku",
-    label: "Claude Haiku 4.5 (Bedrock)",
-    description: "Fast, low-cost Anthropic Claude Haiku, via Amazon Bedrock",
-    contextWindow: 200_000,
+    label: "Claude Haiku 4.5",
+    description:
+      "Fast, low-cost Anthropic Claude Haiku via Amazon Bedrock — 64K context with Trust Layer",
+    contextWindow: 64_000,
     tokenFactor: 1.09, // same Anthropic tokenizer family as Opus
-  },
-  {
-    id: "sfdc_ai__DefaultGPT55",
-    label: "GPT-5.5 (OpenAI)",
-    description: "OpenAI GPT-5.5",
-    contextWindow: 200_000,
-    tokenFactor: 1.09, // UNMEASURED — set to the highest measured family
   },
 ]
 
@@ -158,19 +177,19 @@ export function tokenFactorFor(modelId: string | null): number {
 }
 
 /**
- * Label for the model picker, with the context window folded into the label's
- * existing parenthetical — "Claude Opus 4.8 (Bedrock · 1M)" rather than a second
- * pair of brackets. Derived from `contextWindow` instead of being written into
- * `label`, so the number can't drift from the value the context checks use.
+ * Label for the model picker — "Claude Opus 4.8 (64K)". The window is derived
+ * from `contextWindow` rather than written into `label`, so the number shown can't
+ * drift from the value the context checks use. If a label already ends in a
+ * parenthetical the window folds into it ("… (Bedrock · 1M)") instead of adding a
+ * second pair of brackets.
  *
- * Shows the model's own advertised window — the tiers this app has always shown.
- * A previous revision substituted a single "160K" for every model, on the theory
- * that PLATFORM_PROMPT_CHAR_LIMIT was a token cap that bound below every window.
- * That was wrong on both counts: the platform limit is on characters, not tokens,
- * so it cannot be expressed as a token window at all; and collapsing all six
- * models to one number erased the real difference between them. The token window
- * genuinely is 1M on Opus and Gemini and 200K on the rest, and that is what
- * governs how much conversation a chat can hold.
+ * Shows each model's own effective window, which really does differ between them:
+ * 1M on GPT 5.5 and the Gemini models, 64K on the Bedrock Claude models as served
+ * through the Einstein Trust Layer. A previous revision substituted a single "160K"
+ * for every model, on the theory that PLATFORM_PROMPT_CHAR_LIMIT was a token cap
+ * binding below every window. That was wrong on both counts: the platform limit is
+ * on characters, not tokens, so it cannot be expressed as a token window at all,
+ * and collapsing every model to one number erased a real difference.
  */
 export function pickerLabel(model: ModelConfig): string {
   const window = formatContextWindow(model.contextWindow)
